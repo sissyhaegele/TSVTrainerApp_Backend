@@ -26,113 +26,129 @@ pool.getConnection()
   .then(conn => { console.log('MySQL Connected'); conn.release(); })
   .catch(err => console.error('MySQL Error:', err));
 
+// Wochenspezifische Trainerzuweisungen
 app.get('/api/weekly-assignments', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM weekly_assignments');
-    const assignments = {};
-    rows.forEach(r => {
-      const key = `--`;
-      if (!assignments[key]) assignments[key] = [];
-      assignments[key].push(r.trainer_id);
-    });
-    res.json(assignments);
+    const { courseId, weekNumber, year } = req.query;
+    const [rows] = await pool.query(
+      'SELECT * FROM weekly_assignments WHERE course_id = ? AND week_number = ? AND year = ?',
+      [courseId, weekNumber, year]
+    );
+    res.json(rows);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Database error' });
+    console.error('Fehler beim Abrufen der wochenspezifischen Trainerzuweisungen:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 app.post('/api/weekly-assignments', async (req, res) => {
-  const { courseId, weekNumber, year, trainerIds } = req.body;
   try {
-    await pool.query('DELETE FROM weekly_assignments WHERE course_id = ? AND week_number = ? AND year = ?', [courseId, weekNumber, year]);
-    if (trainerIds && trainerIds.length > 0) {
-      const values = trainerIds.map(t => [courseId, weekNumber, year, t]);
-      await pool.query('INSERT INTO weekly_assignments (course_id, week_number, year, trainer_id) VALUES ?', [values]);
+    const { course_id, week_number, year, trainer_ids } = req.body;
+    await pool.query(
+      'DELETE FROM weekly_assignments WHERE course_id = ? AND week_number = ? AND year = ?',
+      [course_id, week_number, year]
+    );
+    if (trainer_ids && trainer_ids.length > 0) {
+      const values = trainer_ids.map((id) => [course_id, week_number, year, id]);
+      await pool.query(
+        'INSERT INTO weekly_assignments (course_id, week_number, year, trainer_id) VALUES ?',
+        [values]
+      );
     }
-    res.json({ success: true });
+    res.status(201).json({ message: 'Wochenspezifische Trainerzuweisungen aktualisiert' });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Database error' });
+    console.error('Fehler beim Aktualisieren der wochenspezifischen Trainerzuweisungen:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.delete('/api/weekly-assignments/:courseId/:weekNumber/:year', async (req, res) => {
-  const { courseId, weekNumber, year } = req.params;
-  try {
-    await pool.query('DELETE FROM weekly_assignments WHERE course_id = ? AND week_number = ? AND year = ?', [courseId, weekNumber, year]);
-    res.json({ success: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Database error' });
-  }
-});
-
+// Kursausfälle
 app.get('/api/cancelled-courses', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM cancelled_courses');
-    const cancelled = rows.map(r => `--`);
-    res.json(cancelled);
+    const { courseId, weekNumber, year } = req.query;
+    const [rows] = await pool.query(
+      'SELECT * FROM cancelled_courses WHERE course_id = ? AND week_number = ? AND year = ?',
+      [courseId, weekNumber, year]
+    );
+    res.json(rows);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Database error' });
+    console.error('Fehler beim Abrufen der Kursausfälle:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 app.post('/api/cancelled-courses', async (req, res) => {
-  const { courseId, weekNumber, year, reason } = req.body;
   try {
-    await pool.query('INSERT INTO cancelled_courses (course_id, week_number, year, reason) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE reason = ?', [courseId, weekNumber, year, reason || 'Sonstiges', reason || 'Sonstiges']);
-    res.json({ success: true });
+    const { course_id, week_number, year } = req.body;
+    await pool.query(
+      'INSERT INTO cancelled_courses (course_id, week_number, year) VALUES (?, ?, ?)',
+      [course_id, week_number, year]
+    );
+    res.status(201).json({ message: 'Kursausfall hinzugefügt' });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Database error' });
+    console.error('Fehler beim Hinzufügen des Kursausfalls:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.delete('/api/cancelled-courses/:courseId/:weekNumber/:year', async (req, res) => {
-  const { courseId, weekNumber, year } = req.params;
+app.delete('/api/cancelled-courses', async (req, res) => {
   try {
-    await pool.query('DELETE FROM cancelled_courses WHERE course_id = ? AND week_number = ? AND year = ?', [courseId, weekNumber, year]);
-    res.json({ success: true });
+    const { course_id, week_number, year } = req.query;
+    await pool.query(
+      'DELETE FROM cancelled_courses WHERE course_id = ? AND week_number = ? AND year = ?',
+      [course_id, week_number, year]
+    );
+    res.json({ message: 'Kursausfall entfernt' });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Database error' });
+    console.error('Fehler beim Entfernen des Kursausfalls:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
+// Ferienwochen
 app.get('/api/holiday-weeks', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM holiday_weeks');
-    const holidays = rows.map(r => `-`);
-    res.json(holidays);
+    const { weekNumber, year } = req.query;
+    const [rows] = await pool.query(
+      'SELECT * FROM holiday_weeks WHERE week_number = ? AND year = ?',
+      [weekNumber, year]
+    );
+    res.json(rows);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Database error' });
+    console.error('Fehler beim Abrufen der Ferienwochen:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 app.post('/api/holiday-weeks', async (req, res) => {
-  const { weekNumber, year } = req.body;
   try {
-    await pool.query('INSERT INTO holiday_weeks (week_number, year) VALUES (?, ?) ON DUPLICATE KEY UPDATE week_number = week_number', [weekNumber, year]);
-    res.json({ success: true });
+    const { week_number, year } = req.body;
+    await pool.query(
+      'INSERT INTO holiday_weeks (week_number, year) VALUES (?, ?)',
+      [week_number, year]
+    );
+    res.status(201).json({ message: 'Ferienwoche hinzugefügt' });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Database error' });
+    console.error('Fehler beim Hinzufügen der Ferienwoche:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.delete('/api/holiday-weeks/:weekNumber/:year', async (req, res) => {
-  const { weekNumber, year } = req.params;
+app.delete('/api/holiday-weeks', async (req, res) => {
   try {
-    await pool.query('DELETE FROM holiday_weeks WHERE week_number = ? AND year = ?', [weekNumber, year]);
-    res.json({ success: true });
+    const { week_number, year } = req.query;
+    await pool.query(
+      'DELETE FROM holiday_weeks WHERE week_number = ? AND year = ?',
+      [week_number, year]
+    );
+    res.json({ message: 'Ferienwoche entfernt' });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Database error' });
+    console.error('Fehler beim Entfernen der Ferienwoche:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// Bestehende Endpunkte und sonstige Konfiguration...
 
 app.get('/api/health', async (req, res) => {
   try {
