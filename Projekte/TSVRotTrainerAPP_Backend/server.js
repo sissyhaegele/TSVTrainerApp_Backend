@@ -1,22 +1,21 @@
-﻿import express from 'express';
+import express from 'express';
 import mysql from 'mysql2/promise';
 import cors from 'cors';
-import dotenv from 'dotenv';
-
-dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-app.use(cors());
+app.use(cors({
+  origin: 'https://tsvrottrainer.azurewebsites.net'
+}));
 app.use(express.json());
 
 const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  port: process.env.DB_PORT || 3306,
+  host: 'tsvrot2025-server.mysql.database.azure.com',
+  user: 'rarsmzerix',
+  password: 'HalloTSVRot2025',
+  database: 'TSVRot2025_database',
+  port: 3306,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
@@ -145,5 +144,5 @@ app.get('/api/health', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port `);
+  console.log(`Server running on port ${PORT}`);
 });
