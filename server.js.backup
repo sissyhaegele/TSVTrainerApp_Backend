@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import mysql from 'mysql2/promise';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -12,12 +12,9 @@ const PORT = process.env.PORT || 8080;
 const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = [
-      'https://trainer.tsvrot.de',                    // Custom Domain
-      'https://tsvrottrainerapp.azurewebsites.net',   // Azure Frontend
-      'https://tsvrottrainer.azurewebsites.net',      // Production Frontend
+      'https://tsvrottrainer.azurewebsites.net',     // Production Frontend
       'https://tsvrot-trainer.azurewebsites.net',     // Alternative URL
       'http://localhost:3000',                        // React Dev Server
-      'http://localhost:3001',                        // Alternative React Port
       'http://localhost:5173',                        // Vite Dev Server
       'http://localhost:4200'                         // Angular Dev Server
     ];
@@ -512,13 +509,21 @@ app.post('/api/weekly-assignments', async (req, res) => {
   }
 });
 
-// ==================== KURSAUSFÄLLE (KORRIGIERT) ====================
+// ==================== KURSAUSFÄLLE ====================
 
-// GET - Alle ausgefallenen Kurse abrufen (OHNE Query-Parameter)
 app.get('/api/cancelled-courses', async (req, res) => {
   try {
+    const { courseId, weekNumber, year } = req.query;
+    
+    if (!courseId || !weekNumber || !year) {
+      return res.status(400).json({ 
+        error: 'Missing required parameters: courseId, weekNumber, year' 
+      });
+    }
+    
     const [rows] = await pool.query(
-      'SELECT * FROM cancelled_courses ORDER BY year DESC, week_number DESC'
+      'SELECT * FROM cancelled_courses WHERE course_id = ? AND week_number = ? AND year = ?',
+      [courseId, weekNumber, year]
     );
     res.json(rows);
   } catch (error) {
@@ -527,7 +532,6 @@ app.get('/api/cancelled-courses', async (req, res) => {
   }
 });
 
-// POST - Kurs als ausgefallen markieren
 app.post('/api/cancelled-courses', async (req, res) => {
   try {
     const { course_id, week_number, year, reason } = req.body;
@@ -554,7 +558,6 @@ app.post('/api/cancelled-courses', async (req, res) => {
   }
 });
 
-// DELETE - Kurs-Ausfall entfernen (Query-Parameter)
 app.delete('/api/cancelled-courses', async (req, res) => {
   try {
     const { course_id, week_number, year } = req.query;
