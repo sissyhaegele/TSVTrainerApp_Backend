@@ -15,7 +15,7 @@ const pool = mysql.createPool({
   host: 'tsvrot2025-server.mysql.database.azure.com',
   user: 'rarsmzerix',
   password: 'HalloTSVRot2025',
-  database: 'TSVRot2025_database',
+  database: 'tsvrot2025-database',
   port: 3306,
   ssl: { rejectUnauthorized: false }
 });
