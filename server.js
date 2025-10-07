@@ -42,7 +42,7 @@ const pool = mysql.createPool({
   host: process.env.DB_HOST || 'tsvrot2025-server.mysql.database.azure.com',
   user: process.env.DB_USER || 'rarsmzerix',
   password: process.env.DB_PASSWORD || 'HalloTSVRot2025',
-  database: process.env.DB_NAME || 'TSVRot2025_database',
+  database: process.env.DB_NAME || 'tsvrot2025-database',
   port: process.env.DB_PORT || 3306,
   waitForConnections: true,
   connectionLimit: 10,
