@@ -13,7 +13,8 @@ const corsOptions = {
       'http://localhost:5173',
       'http://localhost:5174',
       'https://trainer.tsvrot.de',
-      'https://tsvrottrainerapp.azurewebsites.net'
+      'https://tsvrottrainerapp.azurewebsites.net',
+      'https://tsvrottrainer.azurewebsites.net'  // ✅ Hinzugefügt
     ];
     if (!origin) return callback(null, true);
     
@@ -98,7 +99,8 @@ const toGermanDay = (englishDay) => reverseDayMap[englishDay] || englishDay;
 
 app.get('/api/trainers', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM trainers ORDER BY last_name, first_name');
+    // ✅ FIX: WHERE is_active = 1 hinzugefügt
+    const [rows] = await pool.query('SELECT * FROM trainers WHERE is_active = 1 ORDER BY last_name, first_name');
     
     // Parse JSON Felder und konvertiere zu camelCase
     const trainers = rows.map(row => ({
@@ -107,14 +109,18 @@ app.get('/api/trainers', async (req, res) => {
       lastName: row.last_name,
       email: row.email,
       phone: row.phone,
+      // ✅ NULL-safe JSON parsing (war schon da, aber zur Sicherheit)
       availability: row.availability ? JSON.parse(row.availability) : [],
-      qualifications: row.qualifications ? JSON.parse(row.qualifications) : []
+      qualifications: row.qualifications ? JSON.parse(row.qualifications) : [],
+      isActive: row.is_active,
+      notes: row.notes
     }));
     
     res.json(trainers);
   } catch (error) {
     console.error('Error fetching trainers:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    // ✅ FIX: Detaillierte Fehlermeldung für Debugging
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -131,11 +137,13 @@ app.get('/api/trainers/:id', async (req, res) => {
       email: trainer.email,
       phone: trainer.phone,
       availability: trainer.availability ? JSON.parse(trainer.availability) : [],
-      qualifications: trainer.qualifications ? JSON.parse(trainer.qualifications) : []
+      qualifications: trainer.qualifications ? JSON.parse(trainer.qualifications) : [],
+      isActive: trainer.is_active,
+      notes: trainer.notes
     });
   } catch (error) {
     console.error('Error fetching trainer:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -165,14 +173,15 @@ app.post('/api/trainers', async (req, res) => {
       email: email || null,
       phone: phone || null,
       availability: availability || [],
-      qualifications: qualifications || []
+      qualifications: qualifications || [],
+      isActive: true
     });
   } catch (error) {
     console.error('Error creating trainer:', error);
     if (error.code === 'ER_DUP_ENTRY') {
       res.status(400).json({ error: 'Email already exists' });
     } else {
-      res.status(500).json({ error: 'Internal server error' });
+      res.status(500).json({ error: 'Internal server error', details: error.message });
     }
   }
 });
@@ -207,7 +216,7 @@ app.put('/api/trainers/:id', async (req, res) => {
     });
   } catch (error) {
     console.error('Error updating trainer:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -230,7 +239,7 @@ app.delete('/api/trainers/:id', async (req, res) => {
   } catch (error) {
     await connection.rollback();
     console.error('Error deleting trainer:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   } finally {
     connection.release();
   }
@@ -244,6 +253,7 @@ app.get('/api/courses', async (req, res) => {
       SELECT c.*, GROUP_CONCAT(ct.trainer_id) as assigned_trainer_ids
       FROM courses c
       LEFT JOIN course_trainers ct ON c.id = ct.course_id
+      WHERE c.is_active = 1
       GROUP BY c.id
       ORDER BY FIELD(c.day_of_week, 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'), c.start_time
     `);
@@ -268,7 +278,7 @@ app.get('/api/courses', async (req, res) => {
     res.json(formattedCourses);
   } catch (error) {
     console.error('Error fetching courses:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -310,7 +320,7 @@ app.post('/api/courses', async (req, res) => {
   } catch (error) {
     await connection.rollback();
     console.error('Error creating course:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   } finally {
     connection.release();
   }
@@ -356,7 +366,7 @@ app.put('/api/courses/:id', async (req, res) => {
   } catch (error) {
     await connection.rollback();
     console.error('Error updating course:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   } finally {
     connection.release();
   }
@@ -369,7 +379,7 @@ app.delete('/api/courses/:id', async (req, res) => {
     res.json({ message: 'Course deleted successfully' });
   } catch (error) {
     console.error('Error deleting course:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -389,7 +399,7 @@ app.get('/api/weekly-assignments', async (req, res) => {
     res.json(rows);
   } catch (error) {
     console.error('Error fetching weekly assignments:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -423,7 +433,7 @@ app.get('/api/weekly-assignments/batch', async (req, res) => {
     res.json(groupedAssignments);
   } catch (error) {
     console.error('Error fetching batch weekly assignments:', error);
-    res.status(500).json({ error: 'Failed to fetch weekly assignments' });
+    res.status(500).json({ error: 'Failed to fetch weekly assignments', details: error.message });
   }
 });
 
@@ -451,7 +461,7 @@ app.post('/api/weekly-assignments', async (req, res) => {
   } catch (error) {
     await connection.rollback();
     console.error('Error updating weekly assignments:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   } finally {
     connection.release();
   }
@@ -482,7 +492,7 @@ app.post('/api/weekly-assignments/batch', async (req, res) => {
   } catch (error) {
     await connection.rollback();
     console.error('Error in batch update:', error);
-    res.status(500).json({ error: 'Failed to update weekly assignments' });
+    res.status(500).json({ error: 'Failed to update weekly assignments', details: error.message });
   } finally {
     connection.release();
   }
@@ -505,7 +515,7 @@ app.get('/api/cancelled-courses', async (req, res) => {
     }
   } catch (error) {
     console.error('Error fetching cancelled courses:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -524,7 +534,7 @@ app.post('/api/cancelled-courses', async (req, res) => {
     res.status(201).json({ message: 'Course cancellation added successfully', id: result.insertId });
   } catch (error) {
     console.error('Error adding cancelled course:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -544,7 +554,7 @@ app.delete('/api/cancelled-courses', async (req, res) => {
     res.json({ message: 'Course cancellation removed successfully' });
   } catch (error) {
     console.error('Error removing cancelled course:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -569,7 +579,7 @@ app.get('/api/holiday-weeks', async (req, res) => {
     res.json(rows);
   } catch (error) {
     console.error('Error fetching holiday weeks:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -585,7 +595,7 @@ app.post('/api/holiday-weeks', async (req, res) => {
     res.status(201).json({ message: 'Holiday week added successfully', id: result.insertId });
   } catch (error) {
     console.error('Error adding holiday week:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -601,7 +611,7 @@ app.delete('/api/holiday-weeks', async (req, res) => {
     res.json({ message: 'Holiday week removed successfully' });
   } catch (error) {
     console.error('Error removing holiday week:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -622,7 +632,7 @@ app.post('/api/training-sessions', async (req, res) => {
     res.status(201).json({ message: 'Training session recorded successfully', id: result.insertId });
   } catch (error) {
     console.error('Error recording training session:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -653,7 +663,7 @@ app.post('/api/check-conflicts', async (req, res) => {
     res.json(conflicts.length > 0 ? { hasConflicts: true, conflicts } : { hasConflicts: false });
   } catch (error) {
     console.error('Error checking conflicts:', error);
-    res.status(500).json({ error: 'Failed to check conflicts' });
+    res.status(500).json({ error: 'Failed to check conflicts', details: error.message });
   }
 });
 
@@ -666,7 +676,7 @@ app.get('/api/health', async (req, res) => {
       status: 'OK', 
       database: 'Connected',
       timestamp: new Date().toISOString(),
-      version: '2.0.1'
+      version: '2.0.2'
     });
   } catch (error) {
     console.error('Health check failed:', error);
@@ -678,15 +688,15 @@ app.get('/api/test', (req, res) => {
   res.json({
     message: 'TSV Rot Trainer API is running',
     timestamp: new Date().toISOString(),
-    version: '2.0.1',
-    features: ['UTF-8', 'Wochentag-Konvertierung', 'availability/qualifications']
+    version: '2.0.2',
+    features: ['UTF-8', 'Wochentag-Konvertierung', 'availability/qualifications', 'is_active filter']
   });
 });
 
 app.get('/', (req, res) => {
   res.json({
     name: 'TSV Rot Trainer API',
-    version: '2.0.1',
+    version: '2.0.2',
     status: 'Running',
     endpoints: {
       health: '/api/health',
@@ -712,9 +722,10 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 TSV Rot Trainer API v2.0.1 running on port ${PORT}`);
+  console.log(`🚀 TSV Rot Trainer API v2.0.2 running on port ${PORT}`);
   console.log(`🔗 Health: http://localhost:${PORT}/api/health`);
   console.log(`✅ UTF-8 Support enabled`);
   console.log(`✅ Wochentag-Konvertierung: Deutsch ↔ Englisch`);
   console.log(`✅ Batch endpoints enabled`);
+  console.log(`✅ is_active filter enabled`);
 });
