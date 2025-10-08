@@ -29,7 +29,14 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.use(express.json());
+app.use(express.json({ charset: 'utf-8' }));
+app.use(express.urlencoded({ extended: true, charset: 'utf-8' }));
+
+// UTF-8 Response Header
+app.use((req, res, next) => {
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  next();
+});
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST || 'tsvrot2025-server.mysql.database.azure.com',
@@ -40,7 +47,8 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  charset: 'utf8mb4'  // ✅ UTF-8 Support
 });
 
 async function initDatabase() {
@@ -61,12 +69,49 @@ app.use((req, res, next) => {
   next();
 });
 
+// ==================== WOCHENTAG-KONVERTIERUNG ====================
+
+const dayMap = {
+  'Montag': 'Monday',
+  'Dienstag': 'Tuesday',
+  'Mittwoch': 'Wednesday',
+  'Donnerstag': 'Thursday',
+  'Freitag': 'Friday',
+  'Samstag': 'Saturday',
+  'Sonntag': 'Sunday'
+};
+
+const reverseDayMap = {
+  'Monday': 'Montag',
+  'Tuesday': 'Dienstag',
+  'Wednesday': 'Mittwoch',
+  'Thursday': 'Donnerstag',
+  'Friday': 'Freitag',
+  'Saturday': 'Samstag',
+  'Sunday': 'Sonntag'
+};
+
+const toEnglishDay = (germanDay) => dayMap[germanDay] || germanDay;
+const toGermanDay = (englishDay) => reverseDayMap[englishDay] || englishDay;
+
 // ==================== TRAINER ====================
 
 app.get('/api/trainers', async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM trainers ORDER BY last_name, first_name');
-    res.json(rows);
+    
+    // Parse JSON Felder und konvertiere zu camelCase
+    const trainers = rows.map(row => ({
+      id: row.id,
+      firstName: row.first_name,
+      lastName: row.last_name,
+      email: row.email,
+      phone: row.phone,
+      availability: row.availability ? JSON.parse(row.availability) : [],
+      qualifications: row.qualifications ? JSON.parse(row.qualifications) : []
+    }));
+    
+    res.json(trainers);
   } catch (error) {
     console.error('Error fetching trainers:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -77,7 +122,17 @@ app.get('/api/trainers/:id', async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM trainers WHERE id = ?', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'Trainer not found' });
-    res.json(rows[0]);
+    
+    const trainer = rows[0];
+    res.json({
+      id: trainer.id,
+      firstName: trainer.first_name,
+      lastName: trainer.last_name,
+      email: trainer.email,
+      phone: trainer.phone,
+      availability: trainer.availability ? JSON.parse(trainer.availability) : [],
+      qualifications: trainer.qualifications ? JSON.parse(trainer.qualifications) : []
+    });
   } catch (error) {
     console.error('Error fetching trainer:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -86,18 +141,32 @@ app.get('/api/trainers/:id', async (req, res) => {
 
 app.post('/api/trainers', async (req, res) => {
   try {
-    const { firstName, lastName, email, phone } = req.body;
+    const { firstName, lastName, email, phone, availability, qualifications } = req.body;
     if (!firstName || !lastName) {
       return res.status(400).json({ error: 'First name and last name are required' });
     }
     
     const [result] = await pool.query(
-      'INSERT INTO trainers (first_name, last_name, email, phone) VALUES (?, ?, ?, ?)',
-      [firstName, lastName, email || null, phone || null]
+      'INSERT INTO trainers (first_name, last_name, email, phone, availability, qualifications) VALUES (?, ?, ?, ?, ?, ?)',
+      [
+        firstName, 
+        lastName, 
+        email || null, 
+        phone || null,
+        JSON.stringify(availability || []),
+        JSON.stringify(qualifications || [])
+      ]
     );
     
-    const [newTrainer] = await pool.query('SELECT * FROM trainers WHERE id = ?', [result.insertId]);
-    res.status(201).json(newTrainer[0]);
+    res.status(201).json({
+      id: result.insertId,
+      firstName: firstName,
+      lastName: lastName,
+      email: email || null,
+      phone: phone || null,
+      availability: availability || [],
+      qualifications: qualifications || []
+    });
   } catch (error) {
     console.error('Error creating trainer:', error);
     if (error.code === 'ER_DUP_ENTRY') {
@@ -110,15 +179,32 @@ app.post('/api/trainers', async (req, res) => {
 
 app.put('/api/trainers/:id', async (req, res) => {
   try {
-    const { firstName, lastName, email, phone } = req.body;
+    const { firstName, lastName, email, phone, availability, qualifications } = req.body;
+    
     const [result] = await pool.query(
-      'UPDATE trainers SET first_name = ?, last_name = ?, email = ?, phone = ? WHERE id = ?',
-      [firstName, lastName, email || null, phone || null, req.params.id]
+      'UPDATE trainers SET first_name = ?, last_name = ?, email = ?, phone = ?, availability = ?, qualifications = ? WHERE id = ?',
+      [
+        firstName, 
+        lastName, 
+        email || null, 
+        phone || null,
+        JSON.stringify(availability || []),
+        JSON.stringify(qualifications || []),
+        req.params.id
+      ]
     );
     
     if (result.affectedRows === 0) return res.status(404).json({ error: 'Trainer not found' });
-    const [updated] = await pool.query('SELECT * FROM trainers WHERE id = ?', [req.params.id]);
-    res.json(updated[0]);
+    
+    res.json({ 
+      id: parseInt(req.params.id), 
+      firstName: firstName, 
+      lastName: lastName, 
+      email: email || null, 
+      phone: phone || null,
+      availability: availability || [],
+      qualifications: qualifications || []
+    });
   } catch (error) {
     console.error('Error updating trainer:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -159,11 +245,21 @@ app.get('/api/courses', async (req, res) => {
       FROM courses c
       LEFT JOIN course_trainers ct ON c.id = ct.course_id
       GROUP BY c.id
-      ORDER BY FIELD(c.day_of_week, 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag'), c.start_time
+      ORDER BY FIELD(c.day_of_week, 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'), c.start_time
     `);
     
+    // Konvertiere zu camelCase und deutsche Wochentage
     const formattedCourses = courses.map(course => ({
-      ...course,
+      id: course.id,
+      name: course.name,
+      description: course.description,
+      dayOfWeek: toGermanDay(course.day_of_week),
+      startTime: course.start_time,
+      endTime: course.end_time,
+      location: course.location,
+      category: course.category,
+      requiredTrainers: course.required_trainers,
+      isActive: course.is_active,
       assignedTrainerIds: course.assigned_trainer_ids 
         ? course.assigned_trainer_ids.split(',').map(id => parseInt(id))
         : []
@@ -186,9 +282,11 @@ app.post('/api/courses', async (req, res) => {
       return res.status(400).json({ error: 'Required fields: name, dayOfWeek, startTime, endTime' });
     }
     
+    const englishDay = toEnglishDay(dayOfWeek);
+    
     const [result] = await connection.query(
       'INSERT INTO courses (name, day_of_week, start_time, end_time, location, category, required_trainers) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [name, dayOfWeek, startTime, endTime, location || null, category || null, requiredTrainers || 1]
+      [name, englishDay, startTime, endTime, location || null, category || null, requiredTrainers || 1]
     );
     
     if (assignedTrainerIds && assignedTrainerIds.length > 0) {
@@ -197,16 +295,17 @@ app.post('/api/courses', async (req, res) => {
     }
     
     await connection.commit();
-    const [newCourse] = await pool.query(`
-      SELECT c.*, GROUP_CONCAT(ct.trainer_id) as assigned_trainer_ids
-      FROM courses c LEFT JOIN course_trainers ct ON c.id = ct.course_id
-      WHERE c.id = ? GROUP BY c.id
-    `, [result.insertId]);
     
     res.status(201).json({
-      ...newCourse[0],
-      assignedTrainerIds: newCourse[0].assigned_trainer_ids 
-        ? newCourse[0].assigned_trainer_ids.split(',').map(id => parseInt(id)) : []
+      id: result.insertId,
+      name,
+      dayOfWeek: dayOfWeek,
+      startTime,
+      endTime,
+      location,
+      category,
+      requiredTrainers: requiredTrainers || 1,
+      assignedTrainerIds: assignedTrainerIds || []
     });
   } catch (error) {
     await connection.rollback();
@@ -223,9 +322,11 @@ app.put('/api/courses/:id', async (req, res) => {
     await connection.beginTransaction();
     const { name, dayOfWeek, startTime, endTime, location, category, requiredTrainers, assignedTrainerIds } = req.body;
     
+    const englishDay = toEnglishDay(dayOfWeek);
+    
     const [result] = await connection.query(
       'UPDATE courses SET name = ?, day_of_week = ?, start_time = ?, end_time = ?, location = ?, category = ?, required_trainers = ? WHERE id = ?',
-      [name, dayOfWeek, startTime, endTime, location || null, category || null, requiredTrainers || 1, req.params.id]
+      [name, englishDay, startTime, endTime, location || null, category || null, requiredTrainers || 1, req.params.id]
     );
     
     if (result.affectedRows === 0) {
@@ -240,16 +341,17 @@ app.put('/api/courses/:id', async (req, res) => {
     }
     
     await connection.commit();
-    const [updated] = await pool.query(`
-      SELECT c.*, GROUP_CONCAT(ct.trainer_id) as assigned_trainer_ids
-      FROM courses c LEFT JOIN course_trainers ct ON c.id = ct.course_id
-      WHERE c.id = ? GROUP BY c.id
-    `, [req.params.id]);
     
     res.json({
-      ...updated[0],
-      assignedTrainerIds: updated[0].assigned_trainer_ids 
-        ? updated[0].assigned_trainer_ids.split(',').map(id => parseInt(id)) : []
+      id: parseInt(req.params.id),
+      name,
+      dayOfWeek: dayOfWeek,
+      startTime,
+      endTime,
+      location,
+      category,
+      requiredTrainers: requiredTrainers || 1,
+      assignedTrainerIds: assignedTrainerIds || []
     });
   } catch (error) {
     await connection.rollback();
@@ -291,7 +393,6 @@ app.get('/api/weekly-assignments', async (req, res) => {
   }
 });
 
-// NEU: Batch-Endpunkt für Performance-Optimierung
 app.get('/api/weekly-assignments/batch', async (req, res) => {
   const { weekNumber, year } = req.query;
   if (!weekNumber || !year) {
@@ -356,7 +457,6 @@ app.post('/api/weekly-assignments', async (req, res) => {
   }
 });
 
-// NEU: Batch-Update für Performance
 app.post('/api/weekly-assignments/batch', async (req, res) => {
   const { updates, weekNumber, year } = req.body;
   if (!updates || !weekNumber || !year) {
@@ -566,7 +666,7 @@ app.get('/api/health', async (req, res) => {
       status: 'OK', 
       database: 'Connected',
       timestamp: new Date().toISOString(),
-      version: '2.0.0'
+      version: '2.0.1'
     });
   } catch (error) {
     console.error('Health check failed:', error);
@@ -578,25 +678,26 @@ app.get('/api/test', (req, res) => {
   res.json({
     message: 'TSV Rot Trainer API is running',
     timestamp: new Date().toISOString(),
-    version: '2.0.0'
+    version: '2.0.1',
+    features: ['UTF-8', 'Wochentag-Konvertierung', 'availability/qualifications']
   });
 });
 
 app.get('/', (req, res) => {
   res.json({
     name: 'TSV Rot Trainer API',
-    version: '2.0.0',
+    version: '2.0.1',
     status: 'Running',
     endpoints: {
       health: '/api/health',
       trainers: '/api/trainers',
       courses: '/api/courses',
       weeklyAssignments: '/api/weekly-assignments',
-      weeklyAssignmentsBatch: '/api/weekly-assignments/batch (NEW)',
+      weeklyAssignmentsBatch: '/api/weekly-assignments/batch',
       cancelledCourses: '/api/cancelled-courses',
       holidayWeeks: '/api/holiday-weeks',
       trainingSessions: '/api/training-sessions',
-      checkConflicts: '/api/check-conflicts (NEW)'
+      checkConflicts: '/api/check-conflicts'
     }
   });
 });
@@ -611,7 +712,9 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 TSV Rot Trainer API v2.0.0 running on port ${PORT}`);
+  console.log(`🚀 TSV Rot Trainer API v2.0.1 running on port ${PORT}`);
   console.log(`🔗 Health: http://localhost:${PORT}/api/health`);
-  console.log(`✅ Batch endpoints enabled for performance`);
+  console.log(`✅ UTF-8 Support enabled`);
+  console.log(`✅ Wochentag-Konvertierung: Deutsch ↔ Englisch`);
+  console.log(`✅ Batch endpoints enabled`);
 });
