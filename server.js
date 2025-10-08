@@ -1,16 +1,20 @@
 ﻿import express from 'express';
 import mysql from 'mysql2/promise';
 import cors from 'cors';
-const app = express(); // 
+
+const app = express();
+const PORT = process.env.PORT || 8181;
+
 const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = [
       'http://localhost:3000',
       'http://localhost:3001',
+      'http://localhost:5173',
+      'http://localhost:5174',
       'https://trainer.tsvrot.de',
       'https://tsvrottrainerapp.azurewebsites.net'
     ];
-    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
     if (allowedOrigins.indexOf(origin) !== -1) {
@@ -25,8 +29,8 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
+app.use(express.json());
 
-// Datenbank-Konfiguration
 const pool = mysql.createPool({
   host: process.env.DB_HOST || 'tsvrot2025-server.mysql.database.azure.com',
   user: process.env.DB_USER || 'rarsmzerix',
@@ -39,118 +43,26 @@ const pool = mysql.createPool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Datenbank-Verbindungstest und Tabellen erstellen
 async function initDatabase() {
   try {
     const connection = await pool.getConnection();
     console.log('✅ MySQL Connected successfully');
-    
-    // Tabellen erstellen falls nicht vorhanden
-    await connection.query(`
-      CREATE TABLE IF NOT EXISTS trainers (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        first_name VARCHAR(100) NOT NULL,
-        last_name VARCHAR(100) NOT NULL,
-        email VARCHAR(255) UNIQUE,
-        phone VARCHAR(50),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-      )
-    `);
-    
-    await connection.query(`
-      CREATE TABLE IF NOT EXISTS courses (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        day_of_week VARCHAR(20) NOT NULL,
-        start_time TIME NOT NULL,
-        end_time TIME NOT NULL,
-        location VARCHAR(255),
-        category VARCHAR(100),
-        required_trainers INT DEFAULT 1,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-      )
-    `);
-    
-    await connection.query(`
-      CREATE TABLE IF NOT EXISTS course_trainers (
-        course_id INT NOT NULL,
-        trainer_id INT NOT NULL,
-        PRIMARY KEY (course_id, trainer_id),
-        FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
-        FOREIGN KEY (trainer_id) REFERENCES trainers(id) ON DELETE CASCADE
-      )
-    `);
-    
-    await connection.query(`
-      CREATE TABLE IF NOT EXISTS weekly_assignments (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        course_id INT NOT NULL,
-        week_number INT NOT NULL,
-        year INT NOT NULL,
-        trainer_id INT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY unique_assignment (course_id, week_number, year, trainer_id),
-        INDEX idx_week (course_id, week_number, year)
-      )
-    `);
-    
-    await connection.query(`
-      CREATE TABLE IF NOT EXISTS cancelled_courses (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        course_id INT NOT NULL,
-        week_number INT NOT NULL,
-        year INT NOT NULL,
-        reason VARCHAR(255) DEFAULT 'Sonstiges',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY unique_cancellation (course_id, week_number, year)
-      )
-    `);
-    
-    await connection.query(`
-      CREATE TABLE IF NOT EXISTS holiday_weeks (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        week_number INT NOT NULL,
-        year INT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY unique_holiday (week_number, year)
-      )
-    `);
-    
-    await connection.query(`
-      CREATE TABLE IF NOT EXISTS training_sessions (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        week_number INT NOT NULL,
-        year INT NOT NULL,
-        course_id INT NOT NULL,
-        trainer_id INT NOT NULL,
-        hours DECIMAL(3,1) DEFAULT 1.0,
-        status VARCHAR(20) DEFAULT 'done',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_session (week_number, year, trainer_id)
-      )
-    `);
-    
     connection.release();
-    console.log('✅ All database tables initialized');
+    console.log('✅ Database ready');
   } catch (err) {
     console.error('❌ Database initialization error:', err);
   }
 }
 
-// Initialisiere Datenbank beim Start
 initDatabase();
 
-// Request Logging Middleware
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
 });
 
-// ==================== TRAINER ENDPUNKTE ====================
+// ==================== TRAINER ====================
 
-// Alle Trainer abrufen
 app.get('/api/trainers', async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM trainers ORDER BY last_name, first_name');
@@ -161,13 +73,10 @@ app.get('/api/trainers', async (req, res) => {
   }
 });
 
-// Einzelnen Trainer abrufen
 app.get('/api/trainers/:id', async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM trainers WHERE id = ?', [req.params.id]);
-    if (rows.length === 0) {
-      return res.status(404).json({ error: 'Trainer not found' });
-    }
+    if (rows.length === 0) return res.status(404).json({ error: 'Trainer not found' });
     res.json(rows[0]);
   } catch (error) {
     console.error('Error fetching trainer:', error);
@@ -175,11 +84,9 @@ app.get('/api/trainers/:id', async (req, res) => {
   }
 });
 
-// Neuen Trainer erstellen
 app.post('/api/trainers', async (req, res) => {
   try {
     const { firstName, lastName, email, phone } = req.body;
-    
     if (!firstName || !lastName) {
       return res.status(400).json({ error: 'First name and last name are required' });
     }
@@ -201,20 +108,15 @@ app.post('/api/trainers', async (req, res) => {
   }
 });
 
-// Trainer aktualisieren
 app.put('/api/trainers/:id', async (req, res) => {
   try {
     const { firstName, lastName, email, phone } = req.body;
-    
     const [result] = await pool.query(
       'UPDATE trainers SET first_name = ?, last_name = ?, email = ?, phone = ? WHERE id = ?',
       [firstName, lastName, email || null, phone || null, req.params.id]
     );
     
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'Trainer not found' });
-    }
-    
+    if (result.affectedRows === 0) return res.status(404).json({ error: 'Trainer not found' });
     const [updated] = await pool.query('SELECT * FROM trainers WHERE id = ?', [req.params.id]);
     res.json(updated[0]);
   } catch (error) {
@@ -223,39 +125,43 @@ app.put('/api/trainers/:id', async (req, res) => {
   }
 });
 
-// Trainer löschen
 app.delete('/api/trainers/:id', async (req, res) => {
+  const connection = await pool.getConnection();
   try {
-    const [result] = await pool.query('DELETE FROM trainers WHERE id = ?', [req.params.id]);
+    await connection.beginTransaction();
+    await connection.query('DELETE FROM course_trainers WHERE trainer_id = ?', [req.params.id]);
+    await connection.query('DELETE FROM weekly_assignments WHERE trainer_id = ?', [req.params.id]);
+    await connection.query('DELETE FROM training_sessions WHERE trainer_id = ?', [req.params.id]);
+    const [result] = await connection.query('DELETE FROM trainers WHERE id = ?', [req.params.id]);
     
     if (result.affectedRows === 0) {
+      await connection.rollback();
       return res.status(404).json({ error: 'Trainer not found' });
     }
     
+    await connection.commit();
     res.json({ message: 'Trainer deleted successfully' });
   } catch (error) {
+    await connection.rollback();
     console.error('Error deleting trainer:', error);
     res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    connection.release();
   }
 });
 
-// ==================== KURSE ENDPUNKTE ====================
+// ==================== COURSES ====================
 
-// Alle Kurse abrufen (mit zugewiesenen Trainern)
 app.get('/api/courses', async (req, res) => {
   try {
     const [courses] = await pool.query(`
-      SELECT c.*, 
-             GROUP_CONCAT(ct.trainer_id) as assigned_trainer_ids
+      SELECT c.*, GROUP_CONCAT(ct.trainer_id) as assigned_trainer_ids
       FROM courses c
       LEFT JOIN course_trainers ct ON c.id = ct.course_id
       GROUP BY c.id
-      ORDER BY 
-        FIELD(c.day_of_week, 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag'),
-        c.start_time
+      ORDER BY FIELD(c.day_of_week, 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag'), c.start_time
     `);
     
-    // Konvertiere assigned_trainer_ids zu Array
     const formattedCourses = courses.map(course => ({
       ...course,
       assignedTrainerIds: course.assigned_trainer_ids 
@@ -270,42 +176,10 @@ app.get('/api/courses', async (req, res) => {
   }
 });
 
-// Einzelnen Kurs abrufen
-app.get('/api/courses/:id', async (req, res) => {
-  try {
-    const [courses] = await pool.query(`
-      SELECT c.*, 
-             GROUP_CONCAT(ct.trainer_id) as assigned_trainer_ids
-      FROM courses c
-      LEFT JOIN course_trainers ct ON c.id = ct.course_id
-      WHERE c.id = ?
-      GROUP BY c.id
-    `, [req.params.id]);
-    
-    if (courses.length === 0) {
-      return res.status(404).json({ error: 'Course not found' });
-    }
-    
-    const course = {
-      ...courses[0],
-      assignedTrainerIds: courses[0].assigned_trainer_ids 
-        ? courses[0].assigned_trainer_ids.split(',').map(id => parseInt(id))
-        : []
-    };
-    
-    res.json(course);
-  } catch (error) {
-    console.error('Error fetching course:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Neuen Kurs erstellen
 app.post('/api/courses', async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    
     const { name, dayOfWeek, startTime, endTime, location, category, requiredTrainers, assignedTrainerIds } = req.body;
     
     if (!name || !dayOfWeek || !startTime || !endTime) {
@@ -313,40 +187,27 @@ app.post('/api/courses', async (req, res) => {
     }
     
     const [result] = await connection.query(
-      `INSERT INTO courses (name, day_of_week, start_time, end_time, location, category, required_trainers) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      'INSERT INTO courses (name, day_of_week, start_time, end_time, location, category, required_trainers) VALUES (?, ?, ?, ?, ?, ?, ?)',
       [name, dayOfWeek, startTime, endTime, location || null, category || null, requiredTrainers || 1]
     );
     
-    // Trainer zuweisen falls vorhanden
     if (assignedTrainerIds && assignedTrainerIds.length > 0) {
       const values = assignedTrainerIds.map(trainerId => [result.insertId, trainerId]);
-      await connection.query(
-        'INSERT INTO course_trainers (course_id, trainer_id) VALUES ?',
-        [values]
-      );
+      await connection.query('INSERT INTO course_trainers (course_id, trainer_id) VALUES ?', [values]);
     }
     
     await connection.commit();
-    
-    // Neuen Kurs mit Trainern zurückgeben
     const [newCourse] = await pool.query(`
-      SELECT c.*, 
-             GROUP_CONCAT(ct.trainer_id) as assigned_trainer_ids
-      FROM courses c
-      LEFT JOIN course_trainers ct ON c.id = ct.course_id
-      WHERE c.id = ?
-      GROUP BY c.id
+      SELECT c.*, GROUP_CONCAT(ct.trainer_id) as assigned_trainer_ids
+      FROM courses c LEFT JOIN course_trainers ct ON c.id = ct.course_id
+      WHERE c.id = ? GROUP BY c.id
     `, [result.insertId]);
     
-    const formattedCourse = {
+    res.status(201).json({
       ...newCourse[0],
       assignedTrainerIds: newCourse[0].assigned_trainer_ids 
-        ? newCourse[0].assigned_trainer_ids.split(',').map(id => parseInt(id))
-        : []
-    };
-    
-    res.status(201).json(formattedCourse);
+        ? newCourse[0].assigned_trainer_ids.split(',').map(id => parseInt(id)) : []
+    });
   } catch (error) {
     await connection.rollback();
     console.error('Error creating course:', error);
@@ -356,19 +217,14 @@ app.post('/api/courses', async (req, res) => {
   }
 });
 
-// Kurs aktualisieren
 app.put('/api/courses/:id', async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    
     const { name, dayOfWeek, startTime, endTime, location, category, requiredTrainers, assignedTrainerIds } = req.body;
     
     const [result] = await connection.query(
-      `UPDATE courses 
-       SET name = ?, day_of_week = ?, start_time = ?, end_time = ?, 
-           location = ?, category = ?, required_trainers = ?
-       WHERE id = ?`,
+      'UPDATE courses SET name = ?, day_of_week = ?, start_time = ?, end_time = ?, location = ?, category = ?, required_trainers = ? WHERE id = ?',
       [name, dayOfWeek, startTime, endTime, location || null, category || null, requiredTrainers || 1, req.params.id]
     );
     
@@ -377,37 +233,24 @@ app.put('/api/courses/:id', async (req, res) => {
       return res.status(404).json({ error: 'Course not found' });
     }
     
-    // Trainer-Zuweisungen aktualisieren
     await connection.query('DELETE FROM course_trainers WHERE course_id = ?', [req.params.id]);
-    
     if (assignedTrainerIds && assignedTrainerIds.length > 0) {
       const values = assignedTrainerIds.map(trainerId => [req.params.id, trainerId]);
-      await connection.query(
-        'INSERT INTO course_trainers (course_id, trainer_id) VALUES ?',
-        [values]
-      );
+      await connection.query('INSERT INTO course_trainers (course_id, trainer_id) VALUES ?', [values]);
     }
     
     await connection.commit();
-    
-    // Aktualisierten Kurs zurückgeben
     const [updated] = await pool.query(`
-      SELECT c.*, 
-             GROUP_CONCAT(ct.trainer_id) as assigned_trainer_ids
-      FROM courses c
-      LEFT JOIN course_trainers ct ON c.id = ct.course_id
-      WHERE c.id = ?
-      GROUP BY c.id
+      SELECT c.*, GROUP_CONCAT(ct.trainer_id) as assigned_trainer_ids
+      FROM courses c LEFT JOIN course_trainers ct ON c.id = ct.course_id
+      WHERE c.id = ? GROUP BY c.id
     `, [req.params.id]);
     
-    const formattedCourse = {
+    res.json({
       ...updated[0],
       assignedTrainerIds: updated[0].assigned_trainer_ids 
-        ? updated[0].assigned_trainer_ids.split(',').map(id => parseInt(id))
-        : []
-    };
-    
-    res.json(formattedCourse);
+        ? updated[0].assigned_trainer_ids.split(',').map(id => parseInt(id)) : []
+    });
   } catch (error) {
     await connection.rollback();
     console.error('Error updating course:', error);
@@ -417,15 +260,10 @@ app.put('/api/courses/:id', async (req, res) => {
   }
 });
 
-// Kurs löschen
 app.delete('/api/courses/:id', async (req, res) => {
   try {
     const [result] = await pool.query('DELETE FROM courses WHERE id = ?', [req.params.id]);
-    
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'Course not found' });
-    }
-    
+    if (result.affectedRows === 0) return res.status(404).json({ error: 'Course not found' });
     res.json({ message: 'Course deleted successfully' });
   } catch (error) {
     console.error('Error deleting course:', error);
@@ -433,16 +271,13 @@ app.delete('/api/courses/:id', async (req, res) => {
   }
 });
 
-// ==================== WÖCHENTLICHE ZUWEISUNGEN ====================
+// ==================== WEEKLY ASSIGNMENTS ====================
 
 app.get('/api/weekly-assignments', async (req, res) => {
   try {
     const { courseId, weekNumber, year } = req.query;
-    
     if (!courseId || !weekNumber || !year) {
-      return res.status(400).json({ 
-        error: 'Missing required parameters: courseId, weekNumber, year' 
-      });
+      return res.status(400).json({ error: 'Missing required parameters: courseId, weekNumber, year' });
     }
     
     const [rows] = await pool.query(
@@ -456,39 +291,62 @@ app.get('/api/weekly-assignments', async (req, res) => {
   }
 });
 
+// NEU: Batch-Endpunkt für Performance-Optimierung
+app.get('/api/weekly-assignments/batch', async (req, res) => {
+  const { weekNumber, year } = req.query;
+  if (!weekNumber || !year) {
+    return res.status(400).json({ error: 'weekNumber and year are required' });
+  }
+
+  try {
+    const [assignments] = await pool.query(`
+      SELECT wa.id, wa.course_id, wa.week_number, wa.year, wa.trainer_id,
+             t.first_name, t.last_name
+      FROM weekly_assignments wa
+      LEFT JOIN trainers t ON wa.trainer_id = t.id
+      WHERE wa.week_number = ? AND wa.year = ?
+      ORDER BY wa.course_id, wa.trainer_id
+    `, [weekNumber, year]);
+    
+    const groupedAssignments = assignments.reduce((acc, assignment) => {
+      if (!acc[assignment.course_id]) acc[assignment.course_id] = [];
+      acc[assignment.course_id].push({
+        id: assignment.id,
+        trainerId: assignment.trainer_id,
+        firstName: assignment.first_name,
+        lastName: assignment.last_name
+      });
+      return acc;
+    }, {});
+    
+    res.json(groupedAssignments);
+  } catch (error) {
+    console.error('Error fetching batch weekly assignments:', error);
+    res.status(500).json({ error: 'Failed to fetch weekly assignments' });
+  }
+});
+
 app.post('/api/weekly-assignments', async (req, res) => {
   const connection = await pool.getConnection();
   try {
     const { course_id, week_number, year, trainer_ids } = req.body;
-    
     if (!course_id || !week_number || !year) {
-      return res.status(400).json({ 
-        error: 'Missing required fields: course_id, week_number, year' 
-      });
+      return res.status(400).json({ error: 'Missing required fields: course_id, week_number, year' });
     }
     
     await connection.beginTransaction();
-    
-    // Lösche existierende Zuweisungen
     await connection.query(
       'DELETE FROM weekly_assignments WHERE course_id = ? AND week_number = ? AND year = ?',
       [course_id, week_number, year]
     );
     
-    // Füge neue Zuweisungen hinzu
     if (trainer_ids && trainer_ids.length > 0) {
       const values = trainer_ids.map((id) => [course_id, week_number, year, id]);
-      await connection.query(
-        'INSERT INTO weekly_assignments (course_id, week_number, year, trainer_id) VALUES ?',
-        [values]
-      );
+      await connection.query('INSERT INTO weekly_assignments (course_id, week_number, year, trainer_id) VALUES ?', [values]);
     }
     
     await connection.commit();
-    res.status(201).json({ 
-      message: 'Weekly assignments updated successfully',
-      count: trainer_ids ? trainer_ids.length : 0
-    });
+    res.status(201).json({ message: 'Weekly assignments updated successfully', count: trainer_ids ? trainer_ids.length : 0 });
   } catch (error) {
     await connection.rollback();
     console.error('Error updating weekly assignments:', error);
@@ -498,23 +356,53 @@ app.post('/api/weekly-assignments', async (req, res) => {
   }
 });
 
-// ==================== KURSAUSFÄLLE ====================
+// NEU: Batch-Update für Performance
+app.post('/api/weekly-assignments/batch', async (req, res) => {
+  const { updates, weekNumber, year } = req.body;
+  if (!updates || !weekNumber || !year) {
+    return res.status(400).json({ error: 'updates, weekNumber and year are required' });
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    await connection.query('DELETE FROM weekly_assignments WHERE week_number = ? AND year = ?', [weekNumber, year]);
+    
+    for (const [courseId, trainerIds] of Object.entries(updates)) {
+      if (trainerIds && trainerIds.length > 0) {
+        const values = trainerIds.map(trainerId => [courseId, weekNumber, year, trainerId]);
+        if (values.length > 0) {
+          await connection.query('INSERT INTO weekly_assignments (course_id, week_number, year, trainer_id) VALUES ?', [values]);
+        }
+      }
+    }
+    
+    await connection.commit();
+    res.json({ success: true, message: 'Batch update successful' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error in batch update:', error);
+    res.status(500).json({ error: 'Failed to update weekly assignments' });
+  } finally {
+    connection.release();
+  }
+});
+
+// ==================== CANCELLED COURSES ====================
 
 app.get('/api/cancelled-courses', async (req, res) => {
   try {
     const { courseId, weekNumber, year } = req.query;
-    
-    if (!courseId || !weekNumber || !year) {
-      return res.status(400).json({ 
-        error: 'Missing required parameters: courseId, weekNumber, year' 
-      });
+    if (courseId && weekNumber && year) {
+      const [rows] = await pool.query(
+        'SELECT * FROM cancelled_courses WHERE course_id = ? AND week_number = ? AND year = ?',
+        [courseId, weekNumber, year]
+      );
+      res.json(rows);
+    } else {
+      const [rows] = await pool.query('SELECT * FROM cancelled_courses');
+      res.json(rows);
     }
-    
-    const [rows] = await pool.query(
-      'SELECT * FROM cancelled_courses WHERE course_id = ? AND week_number = ? AND year = ?',
-      [courseId, weekNumber, year]
-    );
-    res.json(rows);
   } catch (error) {
     console.error('Error fetching cancelled courses:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -524,23 +412,16 @@ app.get('/api/cancelled-courses', async (req, res) => {
 app.post('/api/cancelled-courses', async (req, res) => {
   try {
     const { course_id, week_number, year, reason } = req.body;
-    
     if (!course_id || !week_number || !year) {
-      return res.status(400).json({ 
-        error: 'Missing required fields: course_id, week_number, year' 
-      });
+      return res.status(400).json({ error: 'Missing required fields: course_id, week_number, year' });
     }
     
     const [result] = await pool.query(
-      'INSERT INTO cancelled_courses (course_id, week_number, year, reason) VALUES (?, ?, ?, ?) ' +
-      'ON DUPLICATE KEY UPDATE reason = VALUES(reason)',
+      'INSERT INTO cancelled_courses (course_id, week_number, year, reason) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE reason = VALUES(reason)',
       [course_id, week_number, year, reason || 'Sonstiges']
     );
     
-    res.status(201).json({ 
-      message: 'Course cancellation added successfully',
-      id: result.insertId
-    });
+    res.status(201).json({ message: 'Course cancellation added successfully', id: result.insertId });
   } catch (error) {
     console.error('Error adding cancelled course:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -550,11 +431,8 @@ app.post('/api/cancelled-courses', async (req, res) => {
 app.delete('/api/cancelled-courses', async (req, res) => {
   try {
     const { course_id, week_number, year } = req.query;
-    
     if (!course_id || !week_number || !year) {
-      return res.status(400).json({ 
-        error: 'Missing required parameters: course_id, week_number, year' 
-      });
+      return res.status(400).json({ error: 'Missing required parameters: course_id, week_number, year' });
     }
     
     const [result] = await pool.query(
@@ -562,10 +440,7 @@ app.delete('/api/cancelled-courses', async (req, res) => {
       [course_id, week_number, year]
     );
     
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: 'Cancellation not found' });
-    }
-    
+    if (result.affectedRows === 0) return res.status(404).json({ message: 'Cancellation not found' });
     res.json({ message: 'Course cancellation removed successfully' });
   } catch (error) {
     console.error('Error removing cancelled course:', error);
@@ -573,12 +448,11 @@ app.delete('/api/cancelled-courses', async (req, res) => {
   }
 });
 
-// ==================== FERIENWOCHEN ====================
+// ==================== HOLIDAY WEEKS ====================
 
 app.get('/api/holiday-weeks', async (req, res) => {
   try {
     const { weekNumber, year } = req.query;
-    
     let query = 'SELECT * FROM holiday_weeks';
     const params = [];
     
@@ -591,7 +465,6 @@ app.get('/api/holiday-weeks', async (req, res) => {
     }
     
     query += ' ORDER BY year DESC, week_number ASC';
-    
     const [rows] = await pool.query(query, params);
     res.json(rows);
   } catch (error) {
@@ -603,26 +476,13 @@ app.get('/api/holiday-weeks', async (req, res) => {
 app.post('/api/holiday-weeks', async (req, res) => {
   try {
     const { week_number, year } = req.body;
-    
     if (!week_number || !year) {
-      return res.status(400).json({ 
-        error: 'Missing required fields: week_number, year' 
-      });
+      return res.status(400).json({ error: 'Missing required fields: week_number, year' });
     }
     
-    const [result] = await pool.query(
-      'INSERT IGNORE INTO holiday_weeks (week_number, year) VALUES (?, ?)',
-      [week_number, year]
-    );
-    
-    if (result.affectedRows === 0) {
-      return res.status(409).json({ message: 'Holiday week already exists' });
-    }
-    
-    res.status(201).json({ 
-      message: 'Holiday week added successfully',
-      id: result.insertId
-    });
+    const [result] = await pool.query('INSERT IGNORE INTO holiday_weeks (week_number, year) VALUES (?, ?)', [week_number, year]);
+    if (result.affectedRows === 0) return res.status(409).json({ message: 'Holiday week already exists' });
+    res.status(201).json({ message: 'Holiday week added successfully', id: result.insertId });
   } catch (error) {
     console.error('Error adding holiday week:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -632,22 +492,12 @@ app.post('/api/holiday-weeks', async (req, res) => {
 app.delete('/api/holiday-weeks', async (req, res) => {
   try {
     const { week_number, year } = req.query;
-    
     if (!week_number || !year) {
-      return res.status(400).json({ 
-        error: 'Missing required parameters: week_number, year' 
-      });
+      return res.status(400).json({ error: 'Missing required parameters: week_number, year' });
     }
     
-    const [result] = await pool.query(
-      'DELETE FROM holiday_weeks WHERE week_number = ? AND year = ?',
-      [week_number, year]
-    );
-    
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: 'Holiday week not found' });
-    }
-    
+    const [result] = await pool.query('DELETE FROM holiday_weeks WHERE week_number = ? AND year = ?', [week_number, year]);
+    if (result.affectedRows === 0) return res.status(404).json({ message: 'Holiday week not found' });
     res.json({ message: 'Holiday week removed successfully' });
   } catch (error) {
     console.error('Error removing holiday week:', error);
@@ -660,32 +510,55 @@ app.delete('/api/holiday-weeks', async (req, res) => {
 app.post('/api/training-sessions', async (req, res) => {
   try {
     const { week_number, year, course_id, trainer_id, hours, status } = req.body;
-    
     if (!week_number || !year || !course_id || !trainer_id) {
-      return res.status(400).json({ 
-        error: 'Missing required fields: week_number, year, course_id, trainer_id' 
-      });
+      return res.status(400).json({ error: 'Missing required fields: week_number, year, course_id, trainer_id' });
     }
     
     const [result] = await pool.query(
-      `INSERT INTO training_sessions (week_number, year, course_id, trainer_id, hours, status) 
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      'INSERT INTO training_sessions (week_number, year, course_id, trainer_id, hours, status) VALUES (?, ?, ?, ?, ?, ?)',
       [week_number, year, course_id, trainer_id, hours || 1.0, status || 'done']
     );
     
-    res.status(201).json({ 
-      message: 'Training session recorded successfully',
-      id: result.insertId
-    });
+    res.status(201).json({ message: 'Training session recorded successfully', id: result.insertId });
   } catch (error) {
     console.error('Error recording training session:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// ==================== UTILITY ENDPUNKTE ====================
+// ==================== KONFLIKT-DETECTION ====================
 
-// Health Check
+app.post('/api/check-conflicts', async (req, res) => {
+  const { weekNumber, year, lastSync } = req.body;
+  
+  try {
+    const query = `
+      SELECT 'weekly_assignment' as type, course_id, last_modified, modified_by
+      FROM weekly_assignments
+      WHERE week_number = ? AND year = ? AND last_modified > ?
+      UNION ALL
+      SELECT 'cancelled_course' as type, course_id, last_modified, modified_by
+      FROM cancelled_courses
+      WHERE week_number = ? AND year = ? AND last_modified > ?
+      UNION ALL
+      SELECT 'holiday_week' as type, NULL as course_id, last_modified, modified_by
+      FROM holiday_weeks
+      WHERE week_number = ? AND year = ? AND last_modified > ?
+    `;
+    
+    const [conflicts] = await pool.query(query, 
+      [weekNumber, year, lastSync, weekNumber, year, lastSync, weekNumber, year, lastSync]
+    );
+    
+    res.json(conflicts.length > 0 ? { hasConflicts: true, conflicts } : { hasConflicts: false });
+  } catch (error) {
+    console.error('Error checking conflicts:', error);
+    res.status(500).json({ error: 'Failed to check conflicts' });
+  }
+});
+
+// ==================== UTILITY ====================
+
 app.get('/api/health', async (req, res) => {
   try {
     const [[dbCheck]] = await pool.query('SELECT 1 as healthy');
@@ -693,70 +566,52 @@ app.get('/api/health', async (req, res) => {
       status: 'OK', 
       database: 'Connected',
       timestamp: new Date().toISOString(),
-      environment: process.env.NODE_ENV || 'production',
-      version: '1.0.0'
+      version: '2.0.0'
     });
   } catch (error) {
     console.error('Health check failed:', error);
-    res.status(500).json({ 
-      status: 'ERROR', 
-      database: 'Disconnected',
-      error: error.message 
-    });
+    res.status(500).json({ status: 'ERROR', database: 'Disconnected', error: error.message });
   }
 });
 
-// Test Endpoint
 app.get('/api/test', (req, res) => {
   res.json({
     message: 'TSV Rot Trainer API is running',
     timestamp: new Date().toISOString(),
-    headers: req.headers,
-    origin: req.get('origin')
+    version: '2.0.0'
   });
 });
 
-// Root Endpoint
 app.get('/', (req, res) => {
   res.json({
     name: 'TSV Rot Trainer API',
-    version: '1.0.0',
+    version: '2.0.0',
     status: 'Running',
     endpoints: {
       health: '/api/health',
-      test: '/api/test',
       trainers: '/api/trainers',
       courses: '/api/courses',
       weeklyAssignments: '/api/weekly-assignments',
+      weeklyAssignmentsBatch: '/api/weekly-assignments/batch (NEW)',
       cancelledCourses: '/api/cancelled-courses',
       holidayWeeks: '/api/holiday-weeks',
-      trainingSessions: '/api/training-sessions'
+      trainingSessions: '/api/training-sessions',
+      checkConflicts: '/api/check-conflicts (NEW)'
     }
   });
 });
 
-// 404 Handler
 app.use((req, res) => {
-  res.status(404).json({ 
-    error: 'Endpoint not found',
-    path: req.path,
-    method: req.method,
-    message: 'Please check the API documentation'
-  });
+  res.status(404).json({ error: 'Endpoint not found', path: req.path, method: req.method });
 });
 
-// Error Handler
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
-  res.status(500).json({ 
-    error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'An error occurred'
-  });
+  res.status(500).json({ error: 'Internal server error', message: err.message });
 });
 
-// Server starten
 app.listen(PORT, () => {
-  console.log(`🚀 TSV Rot Trainer API running on port ${PORT}`);
-  console.log(`📍 Environment: ${process.env.NODE_ENV || 'production'}`);
-  console.log(`🔗 Health check: http://localhost:${PORT}/api/health`);
+  console.log(`🚀 TSV Rot Trainer API v2.0.0 running on port ${PORT}`);
+  console.log(`🔗 Health: http://localhost:${PORT}/api/health`);
+  console.log(`✅ Batch endpoints enabled for performance`);
 });
