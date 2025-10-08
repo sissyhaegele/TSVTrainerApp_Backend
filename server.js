@@ -1,44 +1,30 @@
-import express from 'express';
+﻿import express from 'express';
 import mysql from 'mysql2/promise';
 import cors from 'cors';
-import dotenv from 'dotenv';
-
-dotenv.config();
-
-const app = express();
-const PORT = process.env.PORT || 8080;
-
-// CORS-Konfiguration für alle Frontend-URLs
+const app = express(); // 
 const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = [
-      'https://trainer.tsvrot.de',                    // Custom Domain
-      'https://tsvrottrainerapp.azurewebsites.net',   // Azure Frontend
-      'https://tsvrottrainer.azurewebsites.net',      // Production Frontend
-      'https://tsvrot-trainer.azurewebsites.net',     // Alternative URL
-      'http://localhost:3000',                        // React Dev Server
-      'http://localhost:3001',                        // Alternative React Port
-      'http://localhost:5173',                        // Vite Dev Server
-      'http://localhost:4200'                         // Angular Dev Server
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'https://trainer.tsvrot.de',
+      'https://tsvrottrainerapp.azurewebsites.net'
     ];
-    
-    // Allow requests with no origin (Postman, mobile apps)
+    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
-    if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV === 'development') {
+    if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
-  optionsSuccessStatus: 200,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 };
 
 app.use(cors(corsOptions));
-app.use(express.json());
 
 // Datenbank-Konfiguration
 const pool = mysql.createPool({
@@ -512,13 +498,21 @@ app.post('/api/weekly-assignments', async (req, res) => {
   }
 });
 
-// ==================== KURSAUSFÄLLE (KORRIGIERT) ====================
+// ==================== KURSAUSFÄLLE ====================
 
-// GET - Alle ausgefallenen Kurse abrufen (OHNE Query-Parameter)
 app.get('/api/cancelled-courses', async (req, res) => {
   try {
+    const { courseId, weekNumber, year } = req.query;
+    
+    if (!courseId || !weekNumber || !year) {
+      return res.status(400).json({ 
+        error: 'Missing required parameters: courseId, weekNumber, year' 
+      });
+    }
+    
     const [rows] = await pool.query(
-      'SELECT * FROM cancelled_courses ORDER BY year DESC, week_number DESC'
+      'SELECT * FROM cancelled_courses WHERE course_id = ? AND week_number = ? AND year = ?',
+      [courseId, weekNumber, year]
     );
     res.json(rows);
   } catch (error) {
@@ -527,7 +521,6 @@ app.get('/api/cancelled-courses', async (req, res) => {
   }
 });
 
-// POST - Kurs als ausgefallen markieren
 app.post('/api/cancelled-courses', async (req, res) => {
   try {
     const { course_id, week_number, year, reason } = req.body;
@@ -554,7 +547,6 @@ app.post('/api/cancelled-courses', async (req, res) => {
   }
 });
 
-// DELETE - Kurs-Ausfall entfernen (Query-Parameter)
 app.delete('/api/cancelled-courses', async (req, res) => {
   try {
     const { course_id, week_number, year } = req.query;
