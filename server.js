@@ -721,6 +721,77 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error', message: err.message });
 });
 
+// ===== TRAINER HOURS ENDPOINTS =====
+
+// Trainer-Stunden für ein Jahr abrufen
+app.get('/api/trainer-hours/:year', async (req, res) => {
+  try {
+    const { year } = req.params;
+    
+    const query = `
+      SELECT 
+        trainer_id,
+        SUM(hours) as total_hours,
+        COUNT(*) as total_sessions,
+        MAX(created_at) as last_session
+      FROM training_sessions
+      WHERE year = ? AND status = 'done'
+      GROUP BY trainer_id
+    `;
+    
+    const [results] = await pool.query(query, [year]);
+    
+    // Formatiere Ergebnis als Object mit trainer_id als Key
+    const hours = {};
+    results.forEach(row => {
+      hours[row.trainer_id] = {
+        totalHours: parseFloat(row.total_hours) || 0,
+        totalSessions: row.total_sessions || 0,
+        lastSession: row.last_session
+      };
+    });
+    
+    res.json(hours);
+  } catch (error) {
+    console.error('Error fetching trainer hours:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Trainer-Stunden für aktuellen Monat
+app.get('/api/trainer-hours/:year/:month', async (req, res) => {
+  try {
+    const { year, month } = req.params;
+    
+    const query = `
+      SELECT 
+        trainer_id,
+        SUM(hours) as monthly_hours,
+        COUNT(*) as monthly_sessions
+      FROM training_sessions
+      WHERE year = ? 
+        AND MONTH(created_at) = ?
+        AND status = 'done'
+      GROUP BY trainer_id
+    `;
+    
+    const [results] = await pool.query(query, [year, month]);
+    
+    const hours = {};
+    results.forEach(row => {
+      hours[row.trainer_id] = {
+        monthlyHours: parseFloat(row.monthly_hours) || 0,
+        monthlySessions: row.monthly_sessions || 0
+      };
+    });
+    
+    res.json(hours);
+  } catch (error) {
+    console.error('Error fetching monthly trainer hours:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 TSV Rot Trainer API v2.0.2 running on port ${PORT}`);
   console.log(`🔗 Health: http://localhost:${PORT}/api/health`);
