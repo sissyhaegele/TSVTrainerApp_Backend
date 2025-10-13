@@ -14,7 +14,7 @@ const corsOptions = {
       'http://localhost:5174',
       'https://trainer.tsvrot.de',
       'https://tsvrottrainerapp.azurewebsites.net',
-      'https://tsvrottrainer.azurewebsites.net'  // ✅ Hinzugefügt
+      'https://tsvrottrainer.azurewebsites.net'
     ];
     if (!origin) return callback(null, true);
     
@@ -33,7 +33,6 @@ app.use(cors(corsOptions));
 app.use(express.json({ charset: 'utf-8' }));
 app.use(express.urlencoded({ extended: true, charset: 'utf-8' }));
 
-// UTF-8 Response Header
 app.use((req, res, next) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   next();
@@ -49,7 +48,7 @@ const pool = mysql.createPool({
   connectionLimit: 10,
   queueLimit: 0,
   ssl: { rejectUnauthorized: false },
-  charset: 'utf8mb4'  // ✅ UTF-8 Support
+  charset: 'utf8mb4'
 });
 
 async function initDatabase() {
@@ -99,17 +98,14 @@ const toGermanDay = (englishDay) => reverseDayMap[englishDay] || englishDay;
 
 app.get('/api/trainers', async (req, res) => {
   try {
-    // ✅ FIX: WHERE is_active = 1 hinzugefügt
     const [rows] = await pool.query('SELECT * FROM trainers WHERE is_active = 1 ORDER BY last_name, first_name');
     
-    // Parse JSON Felder und konvertiere zu camelCase
     const trainers = rows.map(row => ({
       id: row.id,
       firstName: row.first_name,
       lastName: row.last_name,
       email: row.email,
       phone: row.phone,
-      // ✅ NULL-safe JSON parsing (war schon da, aber zur Sicherheit)
       availability: row.availability ? JSON.parse(row.availability) : [],
       qualifications: row.qualifications ? JSON.parse(row.qualifications) : [],
       isActive: row.is_active,
@@ -119,7 +115,6 @@ app.get('/api/trainers', async (req, res) => {
     res.json(trainers);
   } catch (error) {
     console.error('Error fetching trainers:', error);
-    // ✅ FIX: Detaillierte Fehlermeldung für Debugging
     res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
@@ -258,7 +253,6 @@ app.get('/api/courses', async (req, res) => {
       ORDER BY FIELD(c.day_of_week, 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'), c.start_time
     `);
     
-    // Konvertiere zu camelCase und deutsche Wochentage
     const formattedCourses = courses.map(course => ({
       id: course.id,
       name: course.name,
@@ -615,26 +609,130 @@ app.delete('/api/holiday-weeks', async (req, res) => {
   }
 });
 
-// ==================== TRAINING SESSIONS ====================
+// ============================================
+// TRAINER-STUNDEN TRACKING ENDPOINTS
+// ============================================
+
+app.get('/api/trainer-hours/:year', async (req, res) => {
+  try {
+    const { year } = req.params;
+    console.log(`[TRAINER-HOURS] Fetching hours for year: ${year}`);
+    
+    const query = `
+      SELECT 
+        trainer_id,
+        SUM(hours) as total_hours,
+        COUNT(*) as total_sessions,
+        MAX(created_at) as last_session
+      FROM training_sessions
+      WHERE year = ? AND status = 'done'
+      GROUP BY trainer_id
+    `;
+    
+    const [results] = await pool.query(query, [year]);
+    console.log(`[TRAINER-HOURS] Found ${results.length} trainers with hours`);
+    
+    const hours = {};
+    results.forEach(row => {
+      hours[row.trainer_id] = {
+        totalHours: parseFloat(row.total_hours) || 0,
+        totalSessions: row.total_sessions || 0,
+        lastSession: row.last_session
+      };
+    });
+    
+    res.json(hours);
+  } catch (error) {
+    console.error('[TRAINER-HOURS] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/trainer-hours/:year/:month', async (req, res) => {
+  try {
+    const { year, month } = req.params;
+    console.log(`[TRAINER-HOURS] Fetching hours for ${year}-${month}`);
+    
+    const query = `
+      SELECT 
+        trainer_id,
+        SUM(hours) as monthly_hours,
+        COUNT(*) as monthly_sessions
+      FROM training_sessions
+      WHERE year = ? AND MONTH(created_at) = ? AND status = 'done'
+      GROUP BY trainer_id
+    `;
+    
+    const [results] = await pool.query(query, [year, month]);
+    console.log(`[TRAINER-HOURS] Found ${results.length} trainers with monthly hours`);
+    
+    const hours = {};
+    results.forEach(row => {
+      hours[row.trainer_id] = {
+        monthlyHours: parseFloat(row.monthly_hours) || 0,
+        monthlySessions: row.monthly_sessions || 0
+      };
+    });
+    
+    res.json(hours);
+  } catch (error) {
+    console.error('[TRAINER-HOURS] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 app.post('/api/training-sessions', async (req, res) => {
   try {
-    const { week_number, year, course_id, trainer_id, hours, status } = req.body;
+    const { week_number, year, course_id, trainer_id, hours, status = 'done' } = req.body;
+    console.log(`[TRAINING-SESSION] Saving: Week ${week_number}/${year}, Course ${course_id}, Trainer ${trainer_id}, Hours ${hours}`);
+    
     if (!week_number || !year || !course_id || !trainer_id) {
-      return res.status(400).json({ error: 'Missing required fields: week_number, year, course_id, trainer_id' });
+      return res.status(400).json({ error: 'Missing required fields' });
     }
     
-    const [result] = await pool.query(
-      'INSERT INTO training_sessions (week_number, year, course_id, trainer_id, hours, status) VALUES (?, ?, ?, ?, ?, ?)',
-      [week_number, year, course_id, trainer_id, hours || 1.0, status || 'done']
-    );
+    const query = `
+      INSERT INTO training_sessions (week_number, year, course_id, trainer_id, hours, status)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `;
     
-    res.status(201).json({ message: 'Training session recorded successfully', id: result.insertId });
+    const [result] = await pool.query(query, [
+      week_number, year, course_id, trainer_id, hours || 1.0, status
+    ]);
+    
+    console.log(`[TRAINING-SESSION] Saved with ID: ${result.insertId}`);
+    res.json({ id: result.insertId, message: 'Training session saved successfully' });
   } catch (error) {
-    console.error('Error recording training session:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
+    console.error('[TRAINING-SESSION] Error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
+
+app.get('/api/training-sessions/trainer/:trainerId/:year', async (req, res) => {
+  try {
+    const { trainerId, year } = req.params;
+    const query = `
+      SELECT 
+        ts.*,
+        c.name as course_name,
+        t.first_name,
+        t.last_name
+      FROM training_sessions ts
+      LEFT JOIN courses c ON ts.course_id = c.id
+      LEFT JOIN trainers t ON ts.trainer_id = t.id
+      WHERE ts.trainer_id = ? AND ts.year = ?
+      ORDER BY ts.week_number DESC
+    `;
+    const [results] = await pool.query(query, [trainerId, year]);
+    res.json(results);
+  } catch (error) {
+    console.error('[TRAINING-SESSIONS] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// Ende TRAINER-STUNDEN ENDPOINTS
+// ============================================
 
 // ==================== KONFLIKT-DETECTION ====================
 
@@ -676,7 +774,7 @@ app.get('/api/health', async (req, res) => {
       status: 'OK', 
       database: 'Connected',
       timestamp: new Date().toISOString(),
-      version: '2.0.2'
+      version: '2.0.3'
     });
   } catch (error) {
     console.error('Health check failed:', error);
@@ -688,15 +786,15 @@ app.get('/api/test', (req, res) => {
   res.json({
     message: 'TSV Rot Trainer API is running',
     timestamp: new Date().toISOString(),
-    version: '2.0.2',
-    features: ['UTF-8', 'Wochentag-Konvertierung', 'availability/qualifications', 'is_active filter']
+    version: '2.0.3',
+    features: ['UTF-8', 'Wochentag-Konvertierung', 'availability/qualifications', 'is_active filter', 'trainer-hours tracking']
   });
 });
 
 app.get('/', (req, res) => {
   res.json({
     name: 'TSV Rot Trainer API',
-    version: '2.0.2',
+    version: '2.0.3',
     status: 'Running',
     endpoints: {
       health: '/api/health',
@@ -707,10 +805,15 @@ app.get('/', (req, res) => {
       cancelledCourses: '/api/cancelled-courses',
       holidayWeeks: '/api/holiday-weeks',
       trainingSessions: '/api/training-sessions',
+      trainerHours: '/api/trainer-hours/:year',
+      trainerHoursMonth: '/api/trainer-hours/:year/:month',
       checkConflicts: '/api/check-conflicts'
     }
   });
 });
+
+// ==================== ERROR HANDLERS ====================
+// WICHTIG: Diese müssen GANZ AM ENDE stehen!
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found', path: req.path, method: req.method });
@@ -721,229 +824,12 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error', message: err.message });
 });
 
-// ===== TRAINER HOURS ENDPOINTS =====
-
-// Trainer-Stunden für ein Jahr abrufen
-app.get('/api/trainer-hours/:year', async (req, res) => {
-  try {
-    const { year } = req.params;
-    
-    const query = `
-      SELECT 
-        trainer_id,
-        SUM(hours) as total_hours,
-        COUNT(*) as total_sessions,
-        MAX(created_at) as last_session
-      FROM training_sessions
-      WHERE year = ? AND status = 'done'
-      GROUP BY trainer_id
-    `;
-    
-    const [results] = await pool.query(query, [year]);
-    
-    // Formatiere Ergebnis als Object mit trainer_id als Key
-    const hours = {};
-    results.forEach(row => {
-      hours[row.trainer_id] = {
-        totalHours: parseFloat(row.total_hours) || 0,
-        totalSessions: row.total_sessions || 0,
-        lastSession: row.last_session
-      };
-    });
-    
-    res.json(hours);
-  } catch (error) {
-    console.error('Error fetching trainer hours:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Trainer-Stunden für aktuellen Monat
-app.get('/api/trainer-hours/:year/:month', async (req, res) => {
-  try {
-    const { year, month } = req.params;
-    
-    const query = `
-      SELECT 
-        trainer_id,
-        SUM(hours) as monthly_hours,
-        COUNT(*) as monthly_sessions
-      FROM training_sessions
-      WHERE year = ? 
-        AND MONTH(created_at) = ?
-        AND status = 'done'
-      GROUP BY trainer_id
-    `;
-    
-    const [results] = await pool.query(query, [year, month]);
-    
-    const hours = {};
-    results.forEach(row => {
-      hours[row.trainer_id] = {
-        monthlyHours: parseFloat(row.monthly_hours) || 0,
-        monthlySessions: row.monthly_sessions || 0
-      };
-    });
-    
-    res.json(hours);
-  } catch (error) {
-    console.error('Error fetching monthly trainer hours:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-// ============================================
-// TRAINER-STUNDEN TRACKING ENDPOINTS
-// ============================================
-
-// Jahresstunden pro Trainer aggregiert
-app.get('/api/trainer-hours/:year', async (req, res) => {
-  try {
-    const { year } = req.params;
-    
-    console.log(`[TRAINER-HOURS] Fetching hours for year: ${year}`);
-    
-    const query = `
-      SELECT 
-        trainer_id,
-        SUM(hours) as total_hours,
-        COUNT(*) as total_sessions,
-        MAX(created_at) as last_session
-      FROM training_sessions
-      WHERE year = ? AND status = 'done'
-      GROUP BY trainer_id
-    `;
-    
-    const [results] = await pool.query(query, [year]);
-    
-    console.log(`[TRAINER-HOURS] Found ${results.length} trainers with hours`);
-    
-    // In Object umwandeln: { trainerId: { totalHours, totalSessions, lastSession } }
-    const hours = {};
-    results.forEach(row => {
-      hours[row.trainer_id] = {
-        totalHours: parseFloat(row.total_hours) || 0,
-        totalSessions: row.total_sessions || 0,
-        lastSession: row.last_session
-      };
-    });
-    
-    res.json(hours);
-  } catch (error) {
-    console.error('[TRAINER-HOURS] Error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Monatsstunden pro Trainer
-app.get('/api/trainer-hours/:year/:month', async (req, res) => {
-  try {
-    const { year, month } = req.params;
-    
-    console.log(`[TRAINER-HOURS] Fetching hours for ${year}-${month}`);
-    
-    const query = `
-      SELECT 
-        trainer_id,
-        SUM(hours) as monthly_hours,
-        COUNT(*) as monthly_sessions
-      FROM training_sessions
-      WHERE year = ? AND MONTH(created_at) = ? AND status = 'done'
-      GROUP BY trainer_id
-    `;
-    
-    const [results] = await pool.query(query, [year, month]);
-    
-    console.log(`[TRAINER-HOURS] Found ${results.length} trainers with monthly hours`);
-    
-    const hours = {};
-    results.forEach(row => {
-      hours[row.trainer_id] = {
-        monthlyHours: parseFloat(row.monthly_hours) || 0,
-        monthlySessions: row.monthly_sessions || 0
-      };
-    });
-    
-    res.json(hours);
-  } catch (error) {
-    console.error('[TRAINER-HOURS] Error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Training Session speichern
-app.post('/api/training-sessions', async (req, res) => {
-  try {
-    const { week_number, year, course_id, trainer_id, hours, status = 'done' } = req.body;
-    
-    console.log(`[TRAINING-SESSION] Saving: Week ${week_number}/${year}, Course ${course_id}, Trainer ${trainer_id}, Hours ${hours}`);
-    
-    // Validierung
-    if (!week_number || !year || !course_id || !trainer_id) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
-    
-    const query = `
-      INSERT INTO training_sessions (week_number, year, course_id, trainer_id, hours, status)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `;
-    
-    const [result] = await pool.query(query, [
-      week_number, 
-      year, 
-      course_id, 
-      trainer_id, 
-      hours || 1.0, 
-      status
-    ]);
-    
-    console.log(`[TRAINING-SESSION] Saved with ID: ${result.insertId}`);
-    
-    res.json({ 
-      id: result.insertId, 
-      message: 'Training session saved successfully' 
-    });
-  } catch (error) {
-    console.error('[TRAINING-SESSION] Error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Alle Training Sessions für einen Trainer (optional, für Debugging)
-app.get('/api/training-sessions/trainer/:trainerId/:year', async (req, res) => {
-  try {
-    const { trainerId, year } = req.params;
-    
-    const query = `
-      SELECT 
-        ts.*,
-        c.name as course_name,
-        t.first_name,
-        t.last_name
-      FROM training_sessions ts
-      LEFT JOIN courses c ON ts.course_id = c.id
-      LEFT JOIN trainers t ON ts.trainer_id = t.id
-      WHERE ts.trainer_id = ? AND ts.year = ?
-      ORDER BY ts.week_number DESC
-    `;
-    
-    const [results] = await pool.query(query, [trainerId, year]);
-    res.json(results);
-  } catch (error) {
-    console.error('[TRAINING-SESSIONS] Error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============================================
-// Ende TRAINER-STUNDEN ENDPOINTS
-// ============================================
-
-
 app.listen(PORT, () => {
-  console.log(`🚀 TSV Rot Trainer API v2.0.2 running on port ${PORT}`);
+  console.log(`🚀 TSV Rot Trainer API v2.0.3 running on port ${PORT}`);
   console.log(`🔗 Health: http://localhost:${PORT}/api/health`);
   console.log(`✅ UTF-8 Support enabled`);
   console.log(`✅ Wochentag-Konvertierung: Deutsch ↔ Englisch`);
   console.log(`✅ Batch endpoints enabled`);
   console.log(`✅ is_active filter enabled`);
+  console.log(`✅ Trainer-hours tracking enabled`);
 });
