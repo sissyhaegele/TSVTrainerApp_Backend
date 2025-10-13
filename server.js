@@ -694,6 +694,8 @@ app.get('/api/trainer-hours/:year', async (req, res) => {
 //     res.status(500).json({ error: error.message });
 //   }
 // });
+
+app.get('/api/trainer-hours/:year/:month', async (req, res) => {
   try {
     const { year, month } = req.params;
     console.log(`[TRAINER-HOURS] Fetching hours for ${year}-${month}`);
