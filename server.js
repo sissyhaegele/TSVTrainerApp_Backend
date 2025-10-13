@@ -618,6 +618,9 @@ app.get('/api/trainer-hours/:year', async (req, res) => {
     const { year } = req.params;
     console.log(`[TRAINER-HOURS] Fetching hours for year: ${year}`);
     
+    // Nur Stunden ab Oktober 2025 zählen
+    const cutoffDate = '2025-10-01 00:00:00';
+    
     const query = `
       SELECT 
         trainer_id,
@@ -625,12 +628,14 @@ app.get('/api/trainer-hours/:year', async (req, res) => {
         COUNT(*) as total_sessions,
         MAX(created_at) as last_session
       FROM training_sessions
-      WHERE year = ? AND status = 'done'
+      WHERE year = ? 
+        AND status = 'done'
+        AND created_at >= ?
       GROUP BY trainer_id
     `;
     
-    const [results] = await pool.query(query, [year]);
-    console.log(`[TRAINER-HOURS] Found ${results.length} trainers with hours`);
+    const [results] = await pool.query(query, [year, cutoffDate]);
+    console.log(`[TRAINER-HOURS] Found ${results.length} trainers with hours (since Oct 2025)`);
     
     const hours = {};
     results.forEach(row => {
@@ -648,7 +653,47 @@ app.get('/api/trainer-hours/:year', async (req, res) => {
   }
 });
 
-app.get('/api/trainer-hours/:year/:month', async (req, res) => {
+// ALTERNATIVE: Nur aktuelles Kalenderjahr zählen (auto-reset am 01.01.)
+// app.get('/api/trainer-hours/:year', async (req, res) => {
+//   try {
+//     const { year } = req.params;
+//     console.log(`[TRAINER-HOURS] Fetching hours for year: ${year}`);
+//     
+//     // Berechne Start des Jahres
+//     const yearStart = `${year}-01-01 00:00:00`;
+//     const yearEnd = `${year}-12-31 23:59:59`;
+//     
+//     const query = `
+//       SELECT 
+//         trainer_id,
+//         SUM(hours) as total_hours,
+//         COUNT(*) as total_sessions,
+//         MAX(created_at) as last_session
+//       FROM training_sessions
+//       WHERE status = 'done'
+//         AND created_at >= ?
+//         AND created_at <= ?
+//       GROUP BY trainer_id
+//     `;
+//     
+//     const [results] = await pool.query(query, [yearStart, yearEnd]);
+//     console.log(`[TRAINER-HOURS] Found ${results.length} trainers with hours in ${year}`);
+//     
+//     const hours = {};
+//     results.forEach(row => {
+//       hours[row.trainer_id] = {
+//         totalHours: parseFloat(row.total_hours) || 0,
+//         totalSessions: row.total_sessions || 0,
+//         lastSession: row.last_session
+//       };
+//     });
+//     
+//     res.json(hours);
+//   } catch (error) {
+//     console.error('[TRAINER-HOURS] Error:', error);
+//     res.status(500).json({ error: error.message });
+//   }
+// });
   try {
     const { year, month } = req.params;
     console.log(`[TRAINER-HOURS] Fetching hours for ${year}-${month}`);
@@ -681,6 +726,29 @@ app.get('/api/trainer-hours/:year/:month', async (req, res) => {
   }
 });
 
+// ✅ NEU: Prüfe ob Woche bereits gespeichert wurde
+app.get('/api/training-sessions/week/:weekNumber/:year', async (req, res) => {
+  try {
+    const { weekNumber, year } = req.params;
+    console.log(`[CHECK-WEEK] Checking if KW ${weekNumber}/${year} has entries`);
+    
+    const query = `
+      SELECT id, course_id, trainer_id, hours, status
+      FROM training_sessions
+      WHERE week_number = ? AND year = ?
+      LIMIT 1
+    `;
+    
+    const [results] = await pool.query(query, [weekNumber, year]);
+    
+    // Gibt leeres Array zurück wenn keine Einträge, sonst die Einträge
+    res.json(results);
+  } catch (error) {
+    console.error('[CHECK-WEEK] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/training-sessions', async (req, res) => {
   try {
     const { week_number, year, course_id, trainer_id, hours, status = 'done' } = req.body;
@@ -688,6 +756,14 @@ app.post('/api/training-sessions', async (req, res) => {
     
     if (!week_number || !year || !course_id || !trainer_id) {
       return res.status(400).json({ error: 'Missing required fields' });
+    }
+    
+    // ✅ VALIDATION: Reject entries before October 2025
+    if (year < 2025 || (year === 2025 && week_number < 40)) {
+      return res.status(400).json({ 
+        error: 'Cannot save training sessions before October 2025 (KW 40)', 
+        provided: `KW ${week_number}/${year}` 
+      });
     }
     
     const query = `
@@ -774,7 +850,7 @@ app.get('/api/health', async (req, res) => {
       status: 'OK', 
       database: 'Connected',
       timestamp: new Date().toISOString(),
-      version: '2.0.3'
+      version: '2.0.5'
     });
   } catch (error) {
     console.error('Health check failed:', error);
@@ -786,15 +862,15 @@ app.get('/api/test', (req, res) => {
   res.json({
     message: 'TSV Rot Trainer API is running',
     timestamp: new Date().toISOString(),
-    version: '2.0.3',
-    features: ['UTF-8', 'Wochentag-Konvertierung', 'availability/qualifications', 'is_active filter', 'trainer-hours tracking']
+    version: '2.0.5',
+    features: ['UTF-8', 'Wochentag-Konvertierung', 'availability/qualifications', 'is_active filter', 'trainer-hours tracking', 'October 2025 cutoff', 'duplicate prevention']
   });
 });
 
 app.get('/', (req, res) => {
   res.json({
     name: 'TSV Rot Trainer API',
-    version: '2.0.3',
+    version: '2.0.5',
     status: 'Running',
     endpoints: {
       health: '/api/health',
@@ -805,10 +881,13 @@ app.get('/', (req, res) => {
       cancelledCourses: '/api/cancelled-courses',
       holidayWeeks: '/api/holiday-weeks',
       trainingSessions: '/api/training-sessions',
+      checkWeek: '/api/training-sessions/week/:weekNumber/:year',
       trainerHours: '/api/trainer-hours/:year',
       trainerHoursMonth: '/api/trainer-hours/:year/:month',
       checkConflicts: '/api/check-conflicts'
-    }
+    },
+    cutoffDate: '2025-10-01',
+    note: 'Training sessions before October 2025 (KW 40) will be rejected'
   });
 });
 
@@ -825,11 +904,13 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 TSV Rot Trainer API v2.0.3 running on port ${PORT}`);
+  console.log(`🚀 TSV Rot Trainer API v2.0.5 running on port ${PORT}`);
   console.log(`🔗 Health: http://localhost:${PORT}/api/health`);
   console.log(`✅ UTF-8 Support enabled`);
   console.log(`✅ Wochentag-Konvertierung: Deutsch ↔ Englisch`);
   console.log(`✅ Batch endpoints enabled`);
   console.log(`✅ is_active filter enabled`);
   console.log(`✅ Trainer-hours tracking enabled`);
+  console.log(`✅ October 2025 cutoff enabled`);
+  console.log(`✅ Duplicate prevention via DB check`);
 });
