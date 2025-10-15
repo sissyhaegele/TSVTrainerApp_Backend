@@ -751,95 +751,309 @@ app.get('/api/training-sessions/week/:weekNumber/:year', async (req, res) => {
   }
 });
 
-app.post('/api/training-sessions', async (req, res) => {
+// ============================================================================
+// NEUE ENDPUNKTE v2.1.0
+// ============================================================================
+
+app.post('/api/training-sessions/finalize-week', async (req, res) => {
+  const { weekNumber, year } = req.body;
+  
+  if (!weekNumber || !year) {
+    return res.status(400).json({ 
+      error: 'weekNumber und year erforderlich' 
+    });
+  }
+  
+  if (year < 2025 || (year === 2025 && weekNumber < 40)) {
+    return res.status(400).json({ 
+      error: 'Stunden können nur ab Oktober 2025 (KW 40) erfasst werden' 
+    });
+  }
+  
+  let connection;
   try {
-    const { week_number, year, course_id, trainer_id, hours, status = 'done' } = req.body;
-    console.log(`[TRAINING-SESSION] Saving: Week ${week_number}/${year}, Course ${course_id}, Trainer ${trainer_id}, Hours ${hours}`);
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
     
-    if (!week_number || !year || !course_id || !trainer_id) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
+    const [existingSessions] = await connection.query(
+      `SELECT COUNT(*) as count FROM training_sessions 
+       WHERE week_number = ? AND year = ? AND status = 'recorded'`,
+      [weekNumber, year]
+    );
     
-    // ✅ VALIDATION: Reject entries before October 2025
-    if (year < 2025 || (year === 2025 && week_number < 40)) {
-      return res.status(400).json({ 
-        error: 'Cannot save training sessions before October 2025 (KW 40)', 
-        provided: `KW ${week_number}/${year}` 
+    if (existingSessions[0].count > 0) {
+      await connection.rollback();
+      return res.json({ 
+        message: 'Woche bereits gespeichert',
+        weekSaved: true,
+        sessionCount: existingSessions[0].count
       });
     }
     
-    const query = `
-      INSERT INTO training_sessions (week_number, year, course_id, trainer_id, hours, status)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `;
-    
-    const [result] = await pool.query(query, [
-      week_number, year, course_id, trainer_id, hours || 1.0, status
-    ]);
-    
-    console.log(`[TRAINING-SESSION] Saved with ID: ${result.insertId}`);
-    res.json({ id: result.insertId, message: 'Training session saved successfully' });
-  } catch (error) {
-    console.error('[TRAINING-SESSION] Error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/training-sessions/trainer/:trainerId/:year', async (req, res) => {
-  try {
-    const { trainerId, year } = req.params;
-    const query = `
-      SELECT 
-        ts.*,
-        c.name as course_name,
-        t.first_name,
-        t.last_name
-      FROM training_sessions ts
-      LEFT JOIN courses c ON ts.course_id = c.id
-      LEFT JOIN trainers t ON ts.trainer_id = t.id
-      WHERE ts.trainer_id = ? AND ts.year = ?
-      ORDER BY ts.week_number DESC
-    `;
-    const [results] = await pool.query(query, [trainerId, year]);
-    res.json(results);
-  } catch (error) {
-    console.error('[TRAINING-SESSIONS] Error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============================================
-// Ende TRAINER-STUNDEN ENDPOINTS
-// ============================================
-
-// ==================== KONFLIKT-DETECTION ====================
-
-app.post('/api/check-conflicts', async (req, res) => {
-  const { weekNumber, year, lastSync } = req.body;
-  
-  try {
-    const query = `
-      SELECT 'weekly_assignment' as type, course_id, last_modified, modified_by
-      FROM weekly_assignments
-      WHERE week_number = ? AND year = ? AND last_modified > ?
-      UNION ALL
-      SELECT 'cancelled_course' as type, course_id, last_modified, modified_by
-      FROM cancelled_courses
-      WHERE week_number = ? AND year = ? AND last_modified > ?
-      UNION ALL
-      SELECT 'holiday_week' as type, NULL as course_id, last_modified, modified_by
-      FROM holiday_weeks
-      WHERE week_number = ? AND year = ? AND last_modified > ?
-    `;
-    
-    const [conflicts] = await pool.query(query, 
-      [weekNumber, year, lastSync, weekNumber, year, lastSync, weekNumber, year, lastSync]
+    const [assignments] = await connection.query(
+      `SELECT DISTINCT
+         wa.course_id,
+         wa.trainer_id,
+         c.start_time,
+         c.end_time,
+         c.name as course_name
+       FROM weekly_assignments wa
+       JOIN courses c ON wa.course_id = c.id
+       WHERE wa.week_number = ? AND wa.year = ? AND c.is_active = 1
+       ORDER BY c.start_time`,
+      [weekNumber, year]
     );
     
-    res.json(conflicts.length > 0 ? { hasConflicts: true, conflicts } : { hasConflicts: false });
+    if (assignments.length === 0) {
+      await connection.rollback();
+      return res.json({ 
+        message: 'Keine Trainer für diese Woche zugewiesen',
+        weekNumber,
+        year,
+        sessionCount: 0
+      });
+    }
+    
+    let recordedSessions = 0;
+    const recordedDetails = [];
+    
+    for (const assignment of assignments) {
+      const { course_id, trainer_id, start_time, end_time, course_name } = assignment;
+      
+      const [startH, startM] = start_time.split(':').map(Number);
+      const [endH, endM] = end_time.split(':').map(Number);
+      const hours = (endH + endM/60) - (startH + startM/60);
+      
+      const [cancelledCheck] = await connection.query(
+        `SELECT id FROM cancelled_courses 
+         WHERE course_id = ? AND week_number = ? AND year = ?`,
+        [course_id, weekNumber, year]
+      );
+      
+      if (cancelledCheck.length > 0) {
+        console.log(`⏭️ KW ${weekNumber}: Kurs "${course_name}" ausgefallen - keine Stunde`);
+        continue;
+      }
+      
+      const [holidayCheck] = await connection.query(
+        `SELECT id FROM holiday_weeks 
+         WHERE week_number = ? AND year = ?`,
+        [weekNumber, year]
+      );
+      
+      if (holidayCheck.length > 0) {
+        console.log(`🏖️ KW ${weekNumber}: Ferienwoche - keine Stunde für "${course_name}"`);
+        continue;
+      }
+      
+      try {
+        await connection.query(
+          `INSERT INTO training_sessions 
+           (week_number, year, course_id, trainer_id, hours, status, is_cancelled, is_holiday, recorded_by)
+           VALUES (?, ?, ?, ?, ?, 'recorded', 0, 0, 'system')`,
+          [weekNumber, year, course_id, trainer_id, hours.toFixed(2)]
+        );
+        
+        recordedSessions++;
+        recordedDetails.push({
+          course: course_name,
+          trainer_id,
+          hours: hours.toFixed(2)
+        });
+      } catch (err) {
+        if (err.code === 'ER_DUP_ENTRY') {
+          console.log(`⚠️ Duplikat für KW ${weekNumber}, Course ${course_id}, Trainer ${trainer_id}`);
+        } else {
+          throw err;
+        }
+      }
+    }
+    
+    await connection.commit();
+    
+    return res.json({
+      success: true,
+      message: `${recordedSessions} Stunden erfasst`,
+      weekNumber,
+      year,
+      sessionCount: recordedSessions,
+      details: recordedDetails
+    });
+    
   } catch (error) {
-    console.error('Error checking conflicts:', error);
-    res.status(500).json({ error: 'Failed to check conflicts', details: error.message });
+    if (connection) {
+      await connection.rollback();
+    }
+    console.error('Fehler bei Woche-Finalisierung:', error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+});
+
+app.get('/api/training-sessions/week/:weekNumber/:year/check', async (req, res) => {
+  const { weekNumber, year } = req.params;
+  
+  try {
+    const [results] = await pool.query(
+      `SELECT COUNT(*) as count FROM training_sessions 
+       WHERE week_number = ? AND year = ? AND status = 'recorded'`,
+      [parseInt(weekNumber), parseInt(year)]
+    );
+    
+    const weekSaved = results[0].count > 0;
+    
+    res.json({
+      weekNumber: parseInt(weekNumber),
+      year: parseInt(year),
+      weekSaved,
+      sessionCount: results[0].count
+    });
+  } catch (error) {
+    console.error('Fehler bei Check:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/trainer-hours/:year', async (req, res) => {
+  const { year } = req.params;
+  
+  try {
+    const [results] = await pool.query(
+      `SELECT 
+         t.id,
+         t.first_name,
+         t.last_name,
+         ROUND(SUM(ts.hours), 2) as totalHours,
+         COUNT(ts.id) as sessionCount,
+         MAX(ts.recorded_at) as lastRecorded
+       FROM training_sessions ts
+       JOIN trainers t ON ts.trainer_id = t.id
+       WHERE ts.year = ? 
+         AND ts.status = 'recorded'
+         AND ts.recorded_at >= '2025-10-01 00:00:00'
+       GROUP BY t.id, t.first_name, t.last_name
+       ORDER BY totalHours DESC`,
+      [parseInt(year)]
+    );
+    
+    const hoursMap = {};
+    results.forEach(row => {
+      hoursMap[row.id] = {
+        firstName: row.first_name,
+        lastName: row.last_name,
+        totalHours: parseFloat(row.totalHours) || 0,
+        sessionCount: row.sessionCount,
+        lastRecorded: row.lastRecorded
+      };
+    });
+    
+    res.json(hoursMap);
+  } catch (error) {
+    console.error('Fehler bei Stunden-Abfrage:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/trainer-hours/:year/:month', async (req, res) => {
+  const { year, month } = req.params;
+  
+  try {
+    const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
+    const nextMonth = parseInt(month) === 12 
+      ? `${parseInt(year) + 1}-01-01` 
+      : `${year}-${String(parseInt(month) + 1).padStart(2, '0')}-01`;
+    
+    const [results] = await pool.query(
+      `SELECT 
+         t.id,
+         t.first_name,
+         t.last_name,
+         ROUND(SUM(ts.hours), 2) as totalHours,
+         COUNT(ts.id) as sessionCount
+       FROM training_sessions ts
+       JOIN trainers t ON ts.trainer_id = t.id
+       WHERE ts.year = ? 
+         AND ts.status = 'recorded'
+         AND ts.recorded_at >= ?
+         AND ts.recorded_at < ?
+       GROUP BY t.id, t.first_name, t.last_name
+       ORDER BY totalHours DESC`,
+      [parseInt(year), monthStart, nextMonth]
+    );
+    
+    const hoursMap = {};
+    results.forEach(row => {
+      hoursMap[row.id] = {
+        firstName: row.first_name,
+        lastName: row.last_name,
+        totalHours: parseFloat(row.totalHours) || 0,
+        sessionCount: row.sessionCount
+      };
+    });
+    
+    res.json(hoursMap);
+  } catch (error) {
+    console.error('Fehler bei Monats-Abfrage:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/training-sessions/:id', async (req, res) => {
+  const { id } = req.params;
+  const { hours } = req.body;
+  
+  if (!hours || hours < 0) {
+    return res.status(400).json({ error: 'Ungültige Stunden-Anzahl' });
+  }
+  
+  try {
+    const [result] = await pool.query(
+      `UPDATE training_sessions 
+       SET hours = ?, status = 'corrected', modified_count = modified_count + 1, recorded_by = 'admin'
+       WHERE id = ?`,
+      [parseFloat(hours).toFixed(2), id]
+    );
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Session nicht gefunden' });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Stunde korrigiert',
+      id,
+      newHours: hours
+    });
+  } catch (error) {
+    console.error('Fehler bei Korrektur:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/training-sessions/:id', async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    const [result] = await pool.query(
+      `DELETE FROM training_sessions WHERE id = ?`,
+      [id]
+    );
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Session nicht gefunden' });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Stunde gelöscht',
+      id
+    });
+  } catch (error) {
+    console.error('Fehler beim Löschen:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -852,7 +1066,7 @@ app.get('/api/health', async (req, res) => {
       status: 'OK', 
       database: 'Connected',
       timestamp: new Date().toISOString(),
-      version: '2.0.5'
+      version: '2.1.0'
     });
   } catch (error) {
     console.error('Health check failed:', error);
