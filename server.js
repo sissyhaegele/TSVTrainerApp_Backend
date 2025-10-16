@@ -94,6 +94,33 @@ const reverseDayMap = {
 const toEnglishDay = (germanDay) => dayMap[germanDay] || germanDay;
 const toGermanDay = (englishDay) => reverseDayMap[englishDay] || englishDay;
 
+// ==================== HILFSFUNKTIONEN ====================
+
+// Berechne Sonntag einer Woche
+const getWeekEndDate = (weekNumber, year) => {
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const dayNum = jan4.getUTCDay() || 7;
+  jan4.setUTCDate(jan4.getUTCDate() - dayNum + 1);
+  
+  const weekStart = new Date(jan4);
+  weekStart.setUTCDate(jan4.getUTCDate() + (weekNumber - 1) * 7);
+  
+  const weekEnd = new Date(weekStart);
+  weekEnd.setUTCDate(weekStart.getUTCDate() + 6);
+  weekEnd.setUTCHours(23, 59, 59, 999);
+  
+  return weekEnd;
+};
+
+// Prüfe ob Woche in der Vergangenheit liegt
+const isWeekInPast = (weekNumber, year) => {
+  const weekEndDate = getWeekEndDate(weekNumber, year);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  
+  return weekEndDate < today;
+};
+
 // ==================== TRAINER ====================
 
 app.get('/api/trainers', async (req, res) => {
@@ -610,7 +637,7 @@ app.delete('/api/holiday-weeks', async (req, res) => {
 });
 
 // ============================================================================
-// TRAINING SESSIONS - v2.2.0 mit Differenz-Logik
+// TRAINING SESSIONS - v2.3.0 mit Vergangenheits-Check
 // ============================================================================
 
 app.post('/api/training-sessions/finalize-week', async (req, res) => {
@@ -623,6 +650,26 @@ app.post('/api/training-sessions/finalize-week', async (req, res) => {
   if (year < 2025 || (year === 2025 && weekNumber < 40)) {
     return res.status(400).json({ 
       error: 'Stunden können nur ab Oktober 2025 (KW 40) erfasst werden' 
+    });
+  }
+  
+  // KRITISCH v2.3.0: Nur Wochen in der VERGANGENHEIT erfassen
+  if (!isWeekInPast(weekNumber, year)) {
+    const weekEndDate = getWeekEndDate(weekNumber, year);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    console.log(`⏳ KW ${weekNumber}/${year} endet am ${weekEndDate.toLocaleDateString('de-DE')} (noch nicht vorbei)`);
+    
+    return res.json({
+      success: false,
+      message: 'Woche liegt noch nicht in der Vergangenheit - nicht erfassbar',
+      weekNumber,
+      year,
+      weekEndDate: weekEndDate.toISOString().split('T')[0],
+      today: today.toISOString().split('T')[0],
+      canFinalize: false,
+      changes: { added: 0, deleted: 0, totalSessions: 0, totalHours: 0 }
     });
   }
   
@@ -756,6 +803,7 @@ app.post('/api/training-sessions/finalize-week', async (req, res) => {
       message: `Änderungen gespeichert`,
       weekNumber,
       year,
+      canFinalize: true,
       changes: {
         added: changes.added,
         deleted: changes.deleted,
@@ -790,11 +838,13 @@ app.get('/api/training-sessions/week/:weekNumber/:year/check', async (req, res) 
     );
     
     const weekSaved = results[0].count > 0;
+    const canFinalize = isWeekInPast(parseInt(weekNumber), parseInt(year));
     
     res.json({
       weekNumber: parseInt(weekNumber),
       year: parseInt(year),
       weekSaved,
+      canFinalize,
       sessionCount: results[0].count,
       totalHours: results[0].totalHours || 0
     });
@@ -997,13 +1047,14 @@ app.get('/api/health', async (req, res) => {
       status: 'OK', 
       database: 'Connected',
       timestamp: new Date().toISOString(),
-      version: '2.2.0',
+      version: '2.3.0',
       features: [
         'stunden-tracking',
         'differenz-logik',
         'duplikat-prevention',
         'cancellation-handling',
-        'flexible-änderungen'
+        'flexible-änderungen',
+        'vergangenheits-check'
       ]
     });
   } catch (error) {
@@ -1016,15 +1067,15 @@ app.get('/api/test', (req, res) => {
   res.json({
     message: 'TSV Rot Trainer API is running',
     timestamp: new Date().toISOString(),
-    version: '2.2.0',
-    features: ['UTF-8', 'Differenz-Logik', 'Flexible Änderungen', 'October 2025 cutoff']
+    version: '2.3.0',
+    features: ['UTF-8', 'Differenz-Logik', 'Flexible Änderungen', 'Vergangenheits-Check']
   });
 });
 
 app.get('/', (req, res) => {
   res.json({
     name: 'TSV Rot Trainer API',
-    version: '2.2.0',
+    version: '2.3.0',
     status: 'Running',
     endpoints: {
       health: '/api/health',
@@ -1041,7 +1092,7 @@ app.get('/', (req, res) => {
       trainerHoursIndividual: '/api/trainer-hours/:trainerId/:year'
     },
     cutoffDate: '2025-10-01',
-    logic: 'Differenz-basierte Stundenerfassung (v2.2.0)'
+    logic: 'v2.3.0: Nur Wochen in der Vergangenheit werden erfasst'
   });
 });
 
@@ -1057,9 +1108,8 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 TSV Rot Trainer API v2.2.0 running on port ${PORT}`);
+  console.log(`🚀 TSV Rot Trainer API v2.3.0 running on port ${PORT}`);
   console.log(`🏥 Health: http://localhost:${PORT}/api/health`);
-  console.log(`✅ Differenz-Logik für Stundenerfassung aktiviert`);
-  console.log(`✅ Flexible Änderungen innerhalb der Woche erlaubt`);
+  console.log(`✅ v2.3.0: Nur Wochen in der Vergangenheit werden erfasst`);
   console.log(`✅ October 2025 cutoff enabled`);
 });
