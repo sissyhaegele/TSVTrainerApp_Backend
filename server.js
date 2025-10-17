@@ -94,7 +94,7 @@ const reverseDayMap = {
 const toEnglishDay = (germanDay) => dayMap[germanDay] || germanDay;
 const toGermanDay = (englishDay) => reverseDayMap[englishDay] || englishDay;
 
-// ==================== HILFSFUNKTIONEN ====================
+// ==================== HILFSFUNKTIONEN v2.5.0 ====================
 
 // Berechne Sonntag einer Woche
 const getWeekEndDate = (weekNumber, year) => {
@@ -112,13 +112,21 @@ const getWeekEndDate = (weekNumber, year) => {
   return weekEnd;
 };
 
-// Prüfe ob Woche in der Vergangenheit liegt
-const isWeekInPast = (weekNumber, year) => {
+// v2.5.0: Prüfe ob Woche in der Vergangenheit oder heute liegt (≤ heute)
+const isWeekInPastOrToday = (weekNumber, year) => {
   const weekEndDate = getWeekEndDate(weekNumber, year);
   const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  today.setHours(23, 59, 59, 999);
   
-  return weekEndDate < today;
+  return weekEndDate <= today;
+};
+
+// v2.5.0: Berechne Stunden aus Kurs
+const calculateCourseHours = (startTime, endTime) => {
+  if (!startTime || !endTime) return 1;
+  const [startH, startM] = startTime.split(':').map(Number);
+  const [endH, endM] = endTime.split(':').map(Number);
+  return (endH + endM / 60) - (startH + startM / 60);
 };
 
 // ==================== TRAINER ====================
@@ -404,7 +412,7 @@ app.delete('/api/courses/:id', async (req, res) => {
   }
 });
 
-// ==================== WEEKLY ASSIGNMENTS ====================
+// ==================== WEEKLY ASSIGNMENTS v2.5.0 ====================
 
 app.get('/api/weekly-assignments', async (req, res) => {
   try {
@@ -458,6 +466,7 @@ app.get('/api/weekly-assignments/batch', async (req, res) => {
   }
 });
 
+// v2.5.0: POST mit Addier/Subtrahier-Logik
 app.post('/api/weekly-assignments', async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -467,6 +476,19 @@ app.post('/api/weekly-assignments', async (req, res) => {
     }
     
     await connection.beginTransaction();
+    
+    // Hole alte Zuweisungen
+    const [oldAssignments] = await connection.query(
+      'SELECT trainer_id FROM weekly_assignments WHERE course_id = ? AND week_number = ? AND year = ?',
+      [course_id, week_number, year]
+    );
+    const oldTrainerIds = oldAssignments.map(a => a.trainer_id);
+    
+    // Bestimme: hinzugefügt, entfernt
+    const toAdd = (trainer_ids || []).filter(id => !oldTrainerIds.includes(id));
+    const toRemove = oldTrainerIds.filter(id => !(trainer_ids || []).includes(id));
+    
+    // Update weekly_assignments
     await connection.query(
       'DELETE FROM weekly_assignments WHERE course_id = ? AND week_number = ? AND year = ?',
       [course_id, week_number, year]
@@ -477,8 +499,60 @@ app.post('/api/weekly-assignments', async (req, res) => {
       await connection.query('INSERT INTO weekly_assignments (course_id, week_number, year, trainer_id) VALUES ?', [values]);
     }
     
+    // v2.5.0: Sync zu training_sessions (nur wenn Woche in Vergangenheit/heute)
+    if (isWeekInPastOrToday(week_number, year)) {
+      // Hole Kurs-Details
+      const [courseData] = await connection.query(
+        'SELECT start_time, end_time FROM courses WHERE id = ?',
+        [course_id]
+      );
+      
+      if (courseData && courseData.length > 0) {
+        const hours = calculateCourseHours(courseData[0].start_time, courseData[0].end_time);
+        
+        // Prüfe ob Kurs ausgefallen oder Ferienwoche
+        const [cancelledCheck] = await connection.query(
+          'SELECT id FROM cancelled_courses WHERE course_id = ? AND week_number = ? AND year = ?',
+          [course_id, week_number, year]
+        );
+        
+        const [holidayCheck] = await connection.query(
+          'SELECT id FROM holiday_weeks WHERE week_number = ? AND year = ?',
+          [week_number, year]
+        );
+        
+        const isCancelled = cancelledCheck.length > 0 || holidayCheck.length > 0;
+        
+        // Addiere: Füge neue Trainer hinzu
+        if (!isCancelled) {
+          for (const trainerId of toAdd) {
+            await connection.query(
+              `INSERT IGNORE INTO training_sessions 
+               (week_number, year, course_id, trainer_id, hours, status, recorded_by)
+               VALUES (?, ?, ?, ?, ?, 'recorded', 'system')`,
+              [week_number, year, course_id, trainerId, hours.toFixed(2)]
+            );
+            console.log(`➕ Stunde hinzugefügt: Trainer ${trainerId} KW ${week_number}/${year} (+${hours.toFixed(2)}h)`);
+          }
+        }
+        
+        // Subtrahiere: Entferne alte Trainer
+        for (const trainerId of toRemove) {
+          await connection.query(
+            'DELETE FROM training_sessions WHERE course_id = ? AND week_number = ? AND year = ? AND trainer_id = ?',
+            [course_id, week_number, year, trainerId]
+          );
+          console.log(`➖ Stunde entfernt: Trainer ${trainerId} KW ${week_number}/${year} (-${hours.toFixed(2)}h)`);
+        }
+      }
+    }
+    
     await connection.commit();
-    res.status(201).json({ message: 'Weekly assignments updated successfully', count: trainer_ids ? trainer_ids.length : 0 });
+    res.status(201).json({ 
+      message: 'Weekly assignments updated successfully', 
+      added: toAdd.length,
+      removed: toRemove.length
+    });
   } catch (error) {
     await connection.rollback();
     console.error('Error updating weekly assignments:', error);
@@ -488,6 +562,7 @@ app.post('/api/weekly-assignments', async (req, res) => {
   }
 });
 
+// v2.5.0: Batch mit Addier/Subtrahier-Logik
 app.post('/api/weekly-assignments/batch', async (req, res) => {
   const { updates, weekNumber, year } = req.body;
   if (!updates || !weekNumber || !year) {
@@ -497,13 +572,75 @@ app.post('/api/weekly-assignments/batch', async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
+    
+    const isInPast = isWeekInPastOrToday(weekNumber, year);
+    
+    // Hole alle alten Zuweisungen für diese Woche
+    const [allOldAssignments] = await connection.query(
+      'SELECT course_id, trainer_id FROM weekly_assignments WHERE week_number = ? AND year = ?',
+      [weekNumber, year]
+    );
+    
+    // Lösche alle alten Zuweisungen
     await connection.query('DELETE FROM weekly_assignments WHERE week_number = ? AND year = ?', [weekNumber, year]);
     
+    // Speichere neue Zuweisungen und sync zu training_sessions
     for (const [courseId, trainerIds] of Object.entries(updates)) {
       if (trainerIds && trainerIds.length > 0) {
         const values = trainerIds.map(trainerId => [courseId, weekNumber, year, trainerId]);
-        if (values.length > 0) {
-          await connection.query('INSERT INTO weekly_assignments (course_id, week_number, year, trainer_id) VALUES ?', [values]);
+        await connection.query('INSERT INTO weekly_assignments (course_id, week_number, year, trainer_id) VALUES ?', [values]);
+        
+        // v2.5.0: Sync nur wenn Woche in Vergangenheit/heute
+        if (isInPast) {
+          const oldTrainerIds = allOldAssignments
+            .filter(a => a.course_id === parseInt(courseId))
+            .map(a => a.trainer_id);
+          
+          const toAdd = trainerIds.filter(id => !oldTrainerIds.includes(id));
+          const toRemove = oldTrainerIds.filter(id => !trainerIds.includes(id));
+          
+          // Hole Kurs-Details
+          const [courseData] = await connection.query(
+            'SELECT start_time, end_time FROM courses WHERE id = ?',
+            [courseId]
+          );
+          
+          if (courseData && courseData.length > 0) {
+            const hours = calculateCourseHours(courseData[0].start_time, courseData[0].end_time);
+            
+            // Prüfe Ausfall/Ferienwoche
+            const [cancelledCheck] = await connection.query(
+              'SELECT id FROM cancelled_courses WHERE course_id = ? AND week_number = ? AND year = ?',
+              [courseId, weekNumber, year]
+            );
+            
+            const [holidayCheck] = await connection.query(
+              'SELECT id FROM holiday_weeks WHERE week_number = ? AND year = ?',
+              [weekNumber, year]
+            );
+            
+            const isCancelled = cancelledCheck.length > 0 || holidayCheck.length > 0;
+            
+            if (!isCancelled) {
+              // Hinzufügen
+              for (const trainerId of toAdd) {
+                await connection.query(
+                  `INSERT IGNORE INTO training_sessions 
+                   (week_number, year, course_id, trainer_id, hours, status, recorded_by)
+                   VALUES (?, ?, ?, ?, ?, 'recorded', 'system')`,
+                  [weekNumber, year, courseId, trainerId, hours.toFixed(2)]
+                );
+              }
+              
+              // Entfernen
+              for (const trainerId of toRemove) {
+                await connection.query(
+                  'DELETE FROM training_sessions WHERE course_id = ? AND week_number = ? AND year = ? AND trainer_id = ?',
+                  [courseId, weekNumber, year, trainerId]
+                );
+              }
+            }
+          }
         }
       }
     }
@@ -519,7 +656,7 @@ app.post('/api/weekly-assignments/batch', async (req, res) => {
   }
 });
 
-// ==================== CANCELLED COURSES ====================
+// ==================== CANCELLED COURSES v2.5.0 ====================
 
 app.get('/api/cancelled-courses', async (req, res) => {
   try {
@@ -540,46 +677,110 @@ app.get('/api/cancelled-courses', async (req, res) => {
   }
 });
 
+// v2.5.0: POST mit Addier/Subtrahier-Logik
 app.post('/api/cancelled-courses', async (req, res) => {
+  const connection = await pool.getConnection();
   try {
     const { course_id, week_number, year, reason } = req.body;
     if (!course_id || !week_number || !year) {
-      return res.status(400).json({ error: 'Missing required fields: course_id, week_number, year' });
+      return res.status(400).json({ error: 'Missing required fields' });
     }
     
-    const [result] = await pool.query(
+    await connection.beginTransaction();
+    
+    // Speichere Ausfall
+    await connection.query(
       'INSERT INTO cancelled_courses (course_id, week_number, year, reason) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE reason = VALUES(reason)',
       [course_id, week_number, year, reason || 'Sonstiges']
     );
     
-    res.status(201).json({ message: 'Course cancellation added successfully', id: result.insertId });
+    // v2.5.0: Lösche training_sessions für diesen Kurs/Woche (Stunden abziehen)
+    if (isWeekInPastOrToday(week_number, year)) {
+      await connection.query(
+        'DELETE FROM training_sessions WHERE course_id = ? AND week_number = ? AND year = ?',
+        [course_id, week_number, year]
+      );
+      console.log(`🚫 Stunden gelöscht: Kurs ${course_id} KW ${week_number}/${year} ausgefallen`);
+    }
+    
+    await connection.commit();
+    res.status(201).json({ message: 'Course cancellation added successfully' });
   } catch (error) {
+    await connection.rollback();
     console.error('Error adding cancelled course:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });
+  } finally {
+    connection.release();
   }
 });
 
+// v2.5.0: DELETE mit Addier/Subtrahier-Logik (Re-Insert)
 app.delete('/api/cancelled-courses', async (req, res) => {
+  const connection = await pool.getConnection();
   try {
     const { course_id, week_number, year } = req.query;
     if (!course_id || !week_number || !year) {
-      return res.status(400).json({ error: 'Missing required parameters: course_id, week_number, year' });
+      return res.status(400).json({ error: 'Missing required parameters' });
     }
     
-    const [result] = await pool.query(
+    await connection.beginTransaction();
+    
+    // Lösche Ausfall-Markierung
+    await connection.query(
       'DELETE FROM cancelled_courses WHERE course_id = ? AND week_number = ? AND year = ?',
       [course_id, week_number, year]
     );
     
-    if (result.affectedRows === 0) return res.status(404).json({ message: 'Cancellation not found' });
+    // v2.5.0: Re-Insert training_sessions (Stunden wieder hinzufügen)
+    if (isWeekInPastOrToday(parseInt(week_number), parseInt(year))) {
+      // Hole Trainer-Zuweisungen
+      const [assignments] = await connection.query(
+        'SELECT trainer_id FROM weekly_assignments WHERE course_id = ? AND week_number = ? AND year = ?',
+        [course_id, week_number, year]
+      );
+      
+      // Hole Kurs-Details
+      const [courseData] = await connection.query(
+        'SELECT start_time, end_time FROM courses WHERE id = ?',
+        [course_id]
+      );
+      
+      if (courseData && courseData.length > 0) {
+        const hours = calculateCourseHours(courseData[0].start_time, courseData[0].end_time);
+        
+        // Prüfe ob nicht auch Ferienwoche ist
+        const [holidayCheck] = await connection.query(
+          'SELECT id FROM holiday_weeks WHERE week_number = ? AND year = ?',
+          [week_number, year]
+        );
+        
+        if (holidayCheck.length === 0) {
+          // Re-insert für alle zugewiesenen Trainer
+          for (const assignment of assignments) {
+            await connection.query(
+              `INSERT IGNORE INTO training_sessions 
+               (week_number, year, course_id, trainer_id, hours, status, recorded_by)
+               VALUES (?, ?, ?, ?, ?, 'recorded', 'system')`,
+              [week_number, year, course_id, assignment.trainer_id, hours.toFixed(2)]
+            );
+          }
+          console.log(`✅ Stunden wiederhergestellt: Kurs ${course_id} KW ${week_number}/${year} reaktiviert`);
+        }
+      }
+    }
+    
+    await connection.commit();
     res.json({ message: 'Course cancellation removed successfully' });
   } catch (error) {
+    await connection.rollback();
     console.error('Error removing cancelled course:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });
+  } finally {
+    connection.release();
   }
 });
 
-// ==================== HOLIDAY WEEKS ====================
+// ==================== HOLIDAY WEEKS v2.5.0 ====================
 
 app.get('/api/holiday-weeks', async (req, res) => {
   try {
@@ -604,227 +805,104 @@ app.get('/api/holiday-weeks', async (req, res) => {
   }
 });
 
+// v2.5.0: POST mit Addier/Subtrahier-Logik
 app.post('/api/holiday-weeks', async (req, res) => {
+  const connection = await pool.getConnection();
   try {
     const { week_number, year } = req.body;
     if (!week_number || !year) {
-      return res.status(400).json({ error: 'Missing required fields: week_number, year' });
+      return res.status(400).json({ error: 'Missing required fields' });
     }
     
-    const [result] = await pool.query('INSERT IGNORE INTO holiday_weeks (week_number, year) VALUES (?, ?)', [week_number, year]);
-    if (result.affectedRows === 0) return res.status(409).json({ message: 'Holiday week already exists' });
-    res.status(201).json({ message: 'Holiday week added successfully', id: result.insertId });
-  } catch (error) {
-    console.error('Error adding holiday week:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
-  }
-});
-
-app.delete('/api/holiday-weeks', async (req, res) => {
-  try {
-    const { week_number, year } = req.query;
-    if (!week_number || !year) {
-      return res.status(400).json({ error: 'Missing required parameters: week_number, year' });
-    }
-    
-    const [result] = await pool.query('DELETE FROM holiday_weeks WHERE week_number = ? AND year = ?', [week_number, year]);
-    if (result.affectedRows === 0) return res.status(404).json({ message: 'Holiday week not found' });
-    res.json({ message: 'Holiday week removed successfully' });
-  } catch (error) {
-    console.error('Error removing holiday week:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
-  }
-});
-
-// ============================================================================
-// TRAINING SESSIONS - v2.3.0 mit Vergangenheits-Check
-// ============================================================================
-
-app.post('/api/training-sessions/finalize-week', async (req, res) => {
-  const { weekNumber, year } = req.body;
-  
-  if (!weekNumber || !year) {
-    return res.status(400).json({ error: 'weekNumber und year erforderlich' });
-  }
-  
-  if (year < 2025 || (year === 2025 && weekNumber < 40)) {
-    return res.status(400).json({ 
-      error: 'Stunden können nur ab Oktober 2025 (KW 40) erfasst werden' 
-    });
-  }
-  
-  // KRITISCH v2.3.0: Nur Wochen in der VERGANGENHEIT erfassen
-  if (!isWeekInPast(weekNumber, year)) {
-    const weekEndDate = getWeekEndDate(weekNumber, year);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    
-    console.log(`⏳ KW ${weekNumber}/${year} endet am ${weekEndDate.toLocaleDateString('de-DE')} (noch nicht vorbei)`);
-    
-    return res.json({
-      success: false,
-      message: 'Woche liegt noch nicht in der Vergangenheit - nicht erfassbar',
-      weekNumber,
-      year,
-      weekEndDate: weekEndDate.toISOString().split('T')[0],
-      today: today.toISOString().split('T')[0],
-      canFinalize: false,
-      changes: { added: 0, deleted: 0, totalSessions: 0, totalHours: 0 }
-    });
-  }
-  
-  let connection;
-  try {
-    connection = await pool.getConnection();
     await connection.beginTransaction();
     
-    // STEP 1: Hole aktuelle Trainer-Zuweisungen (vom User gerade gespeichert)
-    const [currentAssignments] = await connection.query(
-      `SELECT course_id, trainer_id 
-       FROM weekly_assignments
-       WHERE week_number = ? AND year = ?`,
-      [weekNumber, year]
-    );
+    // Speichere Ferienwoche
+    await connection.query('INSERT IGNORE INTO holiday_weeks (week_number, year) VALUES (?, ?)', [week_number, year]);
     
-    // STEP 2: Hole bereits in DB gespeicherte training_sessions
-    const [savedSessions] = await connection.query(
-      `SELECT id, course_id, trainer_id, hours 
-       FROM training_sessions
-       WHERE week_number = ? AND year = ?`,
-      [weekNumber, year]
-    );
-    
-    // STEP 3: Erstelle Maps für Vergleich
-    const currentMap = new Map(
-      currentAssignments.map(a => [`${a.course_id}-${a.trainer_id}`, a])
-    );
-    const savedMap = new Map(
-      savedSessions.map(s => [`${s.course_id}-${s.trainer_id}`, s])
-    );
-    
-    let changes = { added: 0, deleted: 0 };
-    const changeDetails = [];
-    
-    // STEP 4a: DELETE - War gespeichert, ist aber nicht mehr zugewiesen
-    for (const [key, session] of savedMap) {
-      if (!currentMap.has(key)) {
-        await connection.query(
-          `DELETE FROM training_sessions WHERE id = ?`,
-          [session.id]
-        );
-        changes.deleted++;
-        changeDetails.push({
-          action: 'deleted',
-          courseId: session.course_id,
-          trainerId: session.trainer_id,
-          hours: session.hours
-        });
-        console.log(`❌ Gelöscht: Trainer ${session.trainer_id} aus Kurs ${session.course_id} (${session.hours}h)`);
-      }
-    }
-    
-    // STEP 4b: INSERT - Ist zugewiesen, war aber nicht gespeichert
-    for (const [key, assignment] of currentMap) {
-      if (!savedMap.has(key)) {
-        
-        // Hole Kurs-Details (start_time, end_time)
-        const [courseData] = await connection.query(
-          `SELECT start_time, end_time, name FROM courses WHERE id = ?`,
-          [assignment.course_id]
-        );
-        
-        if (!courseData || courseData.length === 0) {
-          console.log(`⚠️ Kurs ${assignment.course_id} nicht gefunden`);
-          continue;
-        }
-        
-        const course = courseData[0];
-        
-        // Prüfe ob Kurs in dieser Woche ausgefallen ist
-        const [cancelledCheck] = await connection.query(
-          `SELECT id FROM cancelled_courses 
-           WHERE course_id = ? AND week_number = ? AND year = ?`,
-          [assignment.course_id, weekNumber, year]
-        );
-        
-        if (cancelledCheck.length > 0) {
-          console.log(`⏭️ Skip: Kurs "${course.name}" ausgefallen in KW ${weekNumber}`);
-          continue;
-        }
-        
-        // Prüfe ob Ferienwoche
-        const [holidayCheck] = await connection.query(
-          `SELECT id FROM holiday_weeks WHERE week_number = ? AND year = ?`,
-          [weekNumber, year]
-        );
-        
-        if (holidayCheck.length > 0) {
-          console.log(`🏖️ Skip: KW ${weekNumber} ist Ferienwoche`);
-          continue;
-        }
-        
-        // Berechne Stunden
-        const [startH, startM] = course.start_time.split(':').map(Number);
-        const [endH, endM] = course.end_time.split(':').map(Number);
-        const hours = (endH + endM / 60) - (startH + startM / 60);
-        
-        // Speichere neue Stunde
-        await connection.query(
-          `INSERT INTO training_sessions 
-           (week_number, year, course_id, trainer_id, hours, status, is_cancelled, is_holiday, recorded_by)
-           VALUES (?, ?, ?, ?, ?, 'recorded', 0, 0, 'system')`,
-          [weekNumber, year, assignment.course_id, assignment.trainer_id, hours.toFixed(2)]
-        );
-        
-        changes.added++;
-        changeDetails.push({
-          action: 'added',
-          courseId: assignment.course_id,
-          trainerId: assignment.trainer_id,
-          hours: hours.toFixed(2),
-          courseName: course.name
-        });
-        console.log(`✅ Hinzugefügt: Trainer ${assignment.trainer_id} zu "${course.name}" (${hours.toFixed(2)}h)`);
-      }
+    // v2.5.0: Lösche ALLE training_sessions für diese Woche
+    if (isWeekInPastOrToday(week_number, year)) {
+      await connection.query(
+        'DELETE FROM training_sessions WHERE week_number = ? AND year = ?',
+        [week_number, year]
+      );
+      console.log(`🏖️ Stunden gelöscht: KW ${week_number}/${year} Ferienwoche`);
     }
     
     await connection.commit();
-    
-    // STEP 5: Hole finale Summe für diese Woche
-    const [totalSessions] = await connection.query(
-      `SELECT COUNT(*) as count, ROUND(SUM(hours), 2) as totalHours 
-       FROM training_sessions
-       WHERE week_number = ? AND year = ?`,
-      [weekNumber, year]
-    );
-    
-    return res.json({
-      success: true,
-      message: `Änderungen gespeichert`,
-      weekNumber,
-      year,
-      canFinalize: true,
-      changes: {
-        added: changes.added,
-        deleted: changes.deleted,
-        totalSessions: totalSessions[0].count,
-        totalHours: totalSessions[0].totalHours
-      },
-      details: changeDetails
-    });
-    
+    res.status(201).json({ message: 'Holiday week added successfully' });
   } catch (error) {
-    if (connection) {
-      await connection.rollback();
-    }
-    console.error('Fehler bei finalize-week:', error);
-    res.status(500).json({ error: error.message });
+    await connection.rollback();
+    console.error('Error adding holiday week:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   } finally {
-    if (connection) {
-      connection.release();
-    }
+    connection.release();
   }
 });
+
+// v2.5.0: DELETE mit Addier/Subtrahier-Logik (Re-Insert)
+app.delete('/api/holiday-weeks', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    const { week_number, year } = req.query;
+    if (!week_number || !year) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+    
+    await connection.beginTransaction();
+    
+    // Lösche Ferienwoche-Markierung
+    await connection.query('DELETE FROM holiday_weeks WHERE week_number = ? AND year = ?', [week_number, year]);
+    
+    // v2.5.0: Re-Insert training_sessions (Stunden wieder hinzufügen)
+    if (isWeekInPastOrToday(parseInt(week_number), parseInt(year))) {
+      // Hole alle Zuweisungen dieser Woche
+      const [assignments] = await connection.query(
+        'SELECT DISTINCT course_id, trainer_id FROM weekly_assignments WHERE week_number = ? AND year = ?',
+        [week_number, year]
+      );
+      
+      for (const assignment of assignments) {
+        // Prüfe ob Kurs nicht auch einzeln ausgefallen ist
+        const [cancelledCheck] = await connection.query(
+          'SELECT id FROM cancelled_courses WHERE course_id = ? AND week_number = ? AND year = ?',
+          [assignment.course_id, week_number, year]
+        );
+        
+        if (cancelledCheck.length === 0) {
+          // Hole Kurs-Details
+          const [courseData] = await connection.query(
+            'SELECT start_time, end_time FROM courses WHERE id = ?',
+            [assignment.course_id]
+          );
+          
+          if (courseData && courseData.length > 0) {
+            const hours = calculateCourseHours(courseData[0].start_time, courseData[0].end_time);
+            
+            await connection.query(
+              `INSERT IGNORE INTO training_sessions 
+               (week_number, year, course_id, trainer_id, hours, status, recorded_by)
+               VALUES (?, ?, ?, ?, ?, 'recorded', 'system')`,
+              [week_number, year, assignment.course_id, assignment.trainer_id, hours.toFixed(2)]
+            );
+          }
+        }
+      }
+      
+      console.log(`✅ Stunden wiederhergestellt: KW ${week_number}/${year} Ferien aufgehoben`);
+    }
+    
+    await connection.commit();
+    res.json({ message: 'Holiday week removed successfully' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error removing holiday week:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
+// ==================== TRAINING SESSIONS ====================
 
 app.get('/api/training-sessions/week/:weekNumber/:year/check', async (req, res) => {
   const { weekNumber, year } = req.params;
@@ -838,13 +916,11 @@ app.get('/api/training-sessions/week/:weekNumber/:year/check', async (req, res) 
     );
     
     const weekSaved = results[0].count > 0;
-    const canFinalize = isWeekInPast(parseInt(weekNumber), parseInt(year));
     
     res.json({
       weekNumber: parseInt(weekNumber),
       year: parseInt(year),
       weekSaved,
-      canFinalize,
       sessionCount: results[0].count,
       totalHours: results[0].totalHours || 0
     });
@@ -1047,14 +1123,14 @@ app.get('/api/health', async (req, res) => {
       status: 'OK', 
       database: 'Connected',
       timestamp: new Date().toISOString(),
-      version: '2.3.0',
+      version: '2.5.0',
       features: [
         'stunden-tracking',
-        'differenz-logik',
+        'addier-subtrahier-logik',
         'duplikat-prevention',
         'cancellation-handling',
-        'flexible-änderungen',
-        'vergangenheits-check'
+        'holiday-weeks',
+        'unique-constraint'
       ]
     });
   } catch (error) {
@@ -1067,15 +1143,15 @@ app.get('/api/test', (req, res) => {
   res.json({
     message: 'TSV Rot Trainer API is running',
     timestamp: new Date().toISOString(),
-    version: '2.3.0',
-    features: ['UTF-8', 'Differenz-Logik', 'Flexible Änderungen', 'Vergangenheits-Check']
+    version: '2.5.0',
+    features: ['UTF-8', 'Addier/Subtrahier-Logik', 'UNIQUE Constraint', 'Vergangenheits-Check']
   });
 });
 
 app.get('/', (req, res) => {
   res.json({
     name: 'TSV Rot Trainer API',
-    version: '2.3.0',
+    version: '2.5.0',
     status: 'Running',
     endpoints: {
       health: '/api/health',
@@ -1085,14 +1161,13 @@ app.get('/', (req, res) => {
       weeklyAssignmentsBatch: '/api/weekly-assignments/batch',
       cancelledCourses: '/api/cancelled-courses',
       holidayWeeks: '/api/holiday-weeks',
-      finalizeWeek: '/api/training-sessions/finalize-week',
       checkWeek: '/api/training-sessions/week/:weekNumber/:year/check',
       trainerHoursYear: '/api/trainer-hours/:year',
       trainerHoursMonth: '/api/trainer-hours/:year/:month',
       trainerHoursIndividual: '/api/trainer-hours/:trainerId/:year'
     },
     cutoffDate: '2025-10-01',
-    logic: 'v2.3.0: Nur Wochen in der Vergangenheit werden erfasst'
+    logic: 'v2.5.0: Addier/Subtrahier-Logik für Stunden (nur Vergangenheit)'
   });
 });
 
@@ -1108,8 +1183,9 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 TSV Rot Trainer API v2.3.0 running on port ${PORT}`);
+  console.log(`🚀 TSV Rot Trainer API v2.5.0 running on port ${PORT}`);
   console.log(`🏥 Health: http://localhost:${PORT}/api/health`);
-  console.log(`✅ v2.3.0: Nur Wochen in der Vergangenheit werden erfasst`);
-  console.log(`✅ October 2025 cutoff enabled`);
+  console.log(`✅ v2.5.0: Addier/Subtrahier-Logik aktiviert`);
+  console.log(`✅ Nur Wochen in der Vergangenheit werden erfasst`);
+  console.log(`✅ UNIQUE Constraint schützt vor Duplikaten`);
 });
