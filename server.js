@@ -142,7 +142,7 @@ const isTrainingDayInPast = (dayOfWeek, weekNumber, year) => {
   
   // Prüfe ob der Trainingstag bereits vorbei ist
   const today = new Date();
-  today.setHours(0, 0, 0, 0); // Anfang des heutigen Tages
+  today.setUTCHours(0, 0, 0, 0); // Anfang des heutigen Tages
   
   const isPast = trainingDate < today;
   
