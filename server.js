@@ -1046,29 +1046,28 @@ app.get('/api/trainer-hours/:year/:month', async (req, res) => {
       ? `${parseInt(year) + 1}-01-01` 
       : `${year}-${String(parseInt(month) + 1).padStart(2, '0')}-01`;
     
+    console.log(`🔍 Monatsstunden Query: year=${year}, month=${month}, range=${monthStart} to ${nextMonth}`);
+    
     const [results] = await pool.query(
       `SELECT 
-         t.id,
-         t.first_name,
-         t.last_name,
+         ts.trainer_id as id,
          ROUND(SUM(ts.hours), 2) as totalHours,
          COUNT(ts.id) as sessionCount
        FROM training_sessions ts
-       JOIN trainers t ON ts.trainer_id = t.id
        WHERE ts.year = ? 
          AND ts.status = 'recorded'
          AND ts.recorded_at >= ?
          AND ts.recorded_at < ?
-       GROUP BY t.id, t.first_name, t.last_name
+       GROUP BY ts.trainer_id
        ORDER BY totalHours DESC`,
       [parseInt(year), monthStart, nextMonth]
     );
     
+    console.log(`📊 Monatsstunden Ergebnisse: ${results.length} Trainer`, results);
+    
     const hoursMap = {};
     results.forEach(row => {
       hoursMap[row.id] = {
-        firstName: row.first_name,
-        lastName: row.last_name,
         totalHours: parseFloat(row.totalHours) || 0,
         sessionCount: row.sessionCount
       };
