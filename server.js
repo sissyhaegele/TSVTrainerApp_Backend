@@ -186,6 +186,23 @@ app.post('/api/training-sessions/sync-past-days', async (req, res) => {
       const dayInPast = isTrainingDayInPast(day_of_week, week_number, year);
       
       if (dayInPast) {
+        // Berechne das echte Trainings-Datum für recorded_at
+        const jan4 = new Date(Date.UTC(year, 0, 4));
+        const dayNum = jan4.getUTCDay() || 7;
+        jan4.setUTCDate(jan4.getUTCDate() - dayNum + 1);
+        
+        const weekStart = new Date(jan4);
+        weekStart.setUTCDate(jan4.getUTCDate() + (week_number - 1) * 7);
+        
+        const dayIndexMap = {
+          'Monday': 0, 'Tuesday': 1, 'Wednesday': 2, 'Thursday': 3,
+          'Friday': 4, 'Saturday': 5, 'Sunday': 6
+        };
+        
+        const dayIndex = dayIndexMap[day_of_week] || 0;
+        const actualTrainingDate = new Date(weekStart);
+        actualTrainingDate.setUTCDate(weekStart.getUTCDate() + dayIndex);
+        
         // Prüfe ob Kurs ausgefallen oder Ferienwoche
         const [cancelledCheck] = await connection.query(
           'SELECT id FROM cancelled_courses WHERE course_id = ? AND week_number = ? AND year = ?',
@@ -203,7 +220,7 @@ app.post('/api/training-sessions/sync-past-days', async (req, res) => {
           // Berechne Stunden
           const hours = calculateCourseHours(start_time, end_time);
           
-          // DELETE alt, INSERT neu (oder UPDATE wenn exists)
+          // DELETE alt, INSERT neu mit echtem Trainings-Datum
           await connection.query(
             'DELETE FROM training_sessions WHERE week_number = ? AND year = ? AND course_id = ? AND trainer_id = ?',
             [week_number, year, course_id, trainer_id]
@@ -211,13 +228,13 @@ app.post('/api/training-sessions/sync-past-days', async (req, res) => {
           
           await connection.query(
             `INSERT INTO training_sessions 
-             (week_number, year, course_id, trainer_id, hours, status, recorded_by)
-             VALUES (?, ?, ?, ?, ?, 'recorded', 'sync')`,
-            [week_number, year, course_id, trainer_id, hours.toFixed(2)]
+             (week_number, year, course_id, trainer_id, hours, status, recorded_by, recorded_at)
+             VALUES (?, ?, ?, ?, ?, 'recorded', 'sync', ?)`,
+            [week_number, year, course_id, trainer_id, hours.toFixed(2), actualTrainingDate.toISOString()]
           );
           
           synced++;
-          console.log(`✅ Sync: Trainer ${trainer_id} Kurs ${course_id} KW ${week_number}/${year} = ${hours.toFixed(2)}h`);
+          console.log(`✅ Sync: Trainer ${trainer_id} Kurs ${course_id} KW ${week_number}/${year} = ${hours.toFixed(2)}h (${actualTrainingDate.toISOString()})`);
         } else {
           // Kurs ist ausgefallen - DELETE
           await connection.query(
