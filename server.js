@@ -230,7 +230,7 @@ app.post('/api/training-sessions/sync-past-days', async (req, res) => {
             `INSERT INTO training_sessions 
              (week_number, year, course_id, trainer_id, hours, status, recorded_by, recorded_at)
              VALUES (?, ?, ?, ?, ?, 'recorded', 'sync', ?)`,
-            [week_number, year, course_id, trainer_id, hours.toFixed(2), actualTrainingDate.toISOString().slice(0, 19).replace('T', ' ')]
+           [week_number, year, course_id, trainer_id, hours.toFixed(2), actualTrainingDate.toISOString().slice(0, 19).replace('T', ' ')]
           );
           
           synced++;
