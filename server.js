@@ -138,7 +138,7 @@ const isTrainingDayInPast = (dayOfWeek, weekNumber, year) => {
   // Berechne das exakte Datum des Trainingstages
   const trainingDate = new Date(weekStart);
   trainingDate.setUTCDate(weekStart.getUTCDate() + dayIndex);
-  trainingDate.setUTCHours(23, 59, 59, 999); // Ende des Tages
+  trainingDate.setUTCHours(0, 0, 0, 0) → Anfang des Tages
   
   // Prüfe ob der Trainingstag bereits vorbei ist
   const today = new Date();
