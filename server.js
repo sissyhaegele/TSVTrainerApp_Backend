@@ -956,49 +956,6 @@ app.get('/api/training-sessions/week/:weekNumber/:year/check', async (req, res) 
   }
 });
 
-app.get('/api/trainer-hours/:trainerId/:year', async (req, res) => {
-  const { trainerId, year } = req.params;
-  
-  try {
-    const [results] = await pool.query(
-      `SELECT 
-         t.id,
-         t.first_name,
-         t.last_name,
-         ROUND(SUM(ts.hours), 2) as totalHours,
-         COUNT(ts.id) as sessionCount,
-         MAX(ts.recorded_at) as lastRecorded
-       FROM training_sessions ts
-       JOIN trainers t ON ts.trainer_id = t.id
-       WHERE ts.trainer_id = ? AND ts.year = ? AND ts.status = 'recorded'
-       GROUP BY t.id, t.first_name, t.last_name`,
-      [parseInt(trainerId), parseInt(year)]
-    );
-    
-    if (results.length === 0) {
-      return res.json({
-        trainerId: parseInt(trainerId),
-        year: parseInt(year),
-        totalHours: 0,
-        sessionCount: 0
-      });
-    }
-    
-    const row = results[0];
-    res.json({
-      trainerId: row.id,
-      firstName: row.first_name,
-      lastName: row.last_name,
-      totalHours: parseFloat(row.totalHours) || 0,
-      sessionCount: row.sessionCount,
-      lastRecorded: row.lastRecorded
-    });
-  } catch (error) {
-    console.error('Fehler bei trainer-hours:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 app.get('/api/trainer-hours/:year', async (req, res) => {
   const { year } = req.params;
   
@@ -1209,4 +1166,46 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`🚀 TSV Rot Trainer API v2.5.1 running on port ${PORT}`);
   console.log(`✅ NEW: POST /api/training-sessions/sync-past-days - Synct alle Trainer in Vergangenheit`);
+});
+app.get('/api/trainer-hours/:trainerId/:year', async (req, res) => {
+  const { trainerId, year } = req.params;
+  
+  try {
+    const [results] = await pool.query(
+      `SELECT 
+         t.id,
+         t.first_name,
+         t.last_name,
+         ROUND(SUM(ts.hours), 2) as totalHours,
+         COUNT(ts.id) as sessionCount,
+         MAX(ts.recorded_at) as lastRecorded
+       FROM training_sessions ts
+       JOIN trainers t ON ts.trainer_id = t.id
+       WHERE ts.trainer_id = ? AND ts.year = ? AND ts.status = 'recorded'
+       GROUP BY t.id, t.first_name, t.last_name`,
+      [parseInt(trainerId), parseInt(year)]
+    );
+    
+    if (results.length === 0) {
+      return res.json({
+        trainerId: parseInt(trainerId),
+        year: parseInt(year),
+        totalHours: 0,
+        sessionCount: 0
+      });
+    }
+    
+    const row = results[0];
+    res.json({
+      trainerId: row.id,
+      firstName: row.first_name,
+      lastName: row.last_name,
+      totalHours: parseFloat(row.totalHours) || 0,
+      sessionCount: row.sessionCount,
+      lastRecorded: row.lastRecorded
+    });
+  } catch (error) {
+    console.error('Fehler bei trainer-hours:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
