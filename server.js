@@ -1013,7 +1013,9 @@ app.get('/api/trainer-hours/:year', async (req, res) => {
          MAX(ts.recorded_at) as lastRecorded
        FROM training_sessions ts
        JOIN trainers t ON ts.trainer_id = t.id
-       WHERE ts.year = ? AND ts.status = 'recorded'
+       WHERE ts.year = ? 
+         AND ts.status = 'recorded'
+         AND DATE(ts.recorded_at) <= CURDATE()
        GROUP BY t.id, t.first_name, t.last_name
        ORDER BY totalHours DESC`,
       [parseInt(year)]
@@ -1058,6 +1060,7 @@ app.get('/api/trainer-hours/:year/:month', async (req, res) => {
          AND ts.status = 'recorded'
          AND ts.recorded_at >= ?
          AND ts.recorded_at < ?
+         AND DATE(ts.recorded_at) <= CURDATE()
        GROUP BY ts.trainer_id
        ORDER BY totalHours DESC`,
       [parseInt(year), monthStart, nextMonth]
