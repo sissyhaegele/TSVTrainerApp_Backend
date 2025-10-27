@@ -1071,6 +1071,38 @@ app.get('/api/special-activities', async (req, res) => {
   }
 });
 
+// GET /api/special-activities/week/:weekNumber/:year - Aktivitäten einer Woche
+app.get('/api/special-activities/week/:weekNumber/:year', async (req, res) => {
+  const { weekNumber, year } = req.params;
+  
+  try {
+    const [activities] = await pool.execute(`
+      SELECT 
+        ts.id,
+        ts.week_number,
+        ts.year,
+        ts.trainer_id,
+        ts.hours,
+        ts.activity_type,
+        ts.custom_type,
+        ts.notes as title,
+        ts.recorded_at as date,
+        ts.status
+      FROM training_sessions ts
+      WHERE ts.week_number = ?
+        AND ts.year = ?
+        AND ts.course_id IS NULL 
+        AND ts.activity_type IS NOT NULL
+      ORDER BY ts.recorded_at ASC, ts.id ASC
+    `, [parseInt(weekNumber), parseInt(year)]);
+    
+    res.json(activities);
+  } catch (error) {
+    console.error('Error loading week activities:', error);
+    res.status(500).json({ error: 'Fehler beim Laden der Wochen-Aktivitäten' });
+  }
+});
+
 // POST /api/special-activities - Neue außerplanmäßige Aktivität erstellen
 app.post('/api/special-activities', async (req, res) => {
   const { 
