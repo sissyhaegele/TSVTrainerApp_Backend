@@ -1129,6 +1129,88 @@ app.post('/api/special-activities', async (req, res) => {
   }
 });
 
+// PUT /api/special-activities/:activityId - Aktivität aktualisieren
+app.put('/api/special-activities/:activityId', async (req, res) => {
+  const { activityId } = req.params;
+  const { 
+    date, 
+    weekNumber, 
+    year, 
+    activityType, 
+    customType, 
+    title, 
+    hours, 
+    notes, 
+    trainerIds 
+  } = req.body;
+  
+  // Validierung
+  if (!date || !weekNumber || !year || !activityType || !title || !hours || !trainerIds || trainerIds.length === 0) {
+    return res.status(400).json({ error: 'Fehlende Pflichtfelder' });
+  }
+  
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    // 1. Finde die alte Aktivität (date + title)
+    const [oldActivity] = await connection.execute(`
+      SELECT recorded_at, notes
+      FROM training_sessions 
+      WHERE id = ? AND course_id IS NULL AND activity_type IS NOT NULL
+    `, [activityId]);
+    
+    if (oldActivity.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Aktivität nicht gefunden' });
+    }
+    
+    const { recorded_at: oldDate, notes: oldTitle } = oldActivity[0];
+    
+    // 2. Lösche ALLE alten Einträge (alle Trainer der alten Aktivität)
+    await connection.execute(`
+      DELETE FROM training_sessions 
+      WHERE course_id IS NULL 
+        AND activity_type IS NOT NULL
+        AND recorded_at = ?
+        AND notes = ?
+    `, [oldDate, oldTitle]);
+    
+    // 3. Erstelle neue Einträge für alle ausgewählten Trainer
+    for (const trainerId of trainerIds) {
+      await connection.execute(`
+        INSERT INTO training_sessions 
+        (week_number, year, course_id, trainer_id, hours, status, activity_type, custom_type, notes, recorded_at, recorded_by)
+        VALUES (?, ?, NULL, ?, ?, 'recorded', ?, ?, ?, ?, 'activity-form')
+      `, [
+        weekNumber,
+        year,
+        trainerId,
+        hours,
+        activityType,
+        activityType === 'sonstiges' ? customType : null,
+        title,
+        date
+      ]);
+    }
+    
+    await connection.commit();
+    
+    res.json({ 
+      success: true, 
+      message: `Aktivität erfolgreich aktualisiert für ${trainerIds.length} Trainer` 
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error updating special activity:', error);
+    res.status(500).json({ error: 'Fehler beim Aktualisieren der Aktivität' });
+  } finally {
+    connection.release();
+  }
+});
+
 // DELETE /api/special-activities/:activityId - Aktivität löschen
 app.delete('/api/special-activities/:activityId', async (req, res) => {
   const { activityId } = req.params;
