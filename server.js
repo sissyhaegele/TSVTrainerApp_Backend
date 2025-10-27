@@ -1060,7 +1060,7 @@ app.get('/api/special-activities', async (req, res) => {
         ts.status
       FROM training_sessions ts
       WHERE ts.course_id IS NULL 
-        AND ts.status = 'special_event'
+        AND ts.activity_type IS NOT NULL
       ORDER BY ts.recorded_at DESC
     `);
     
@@ -1100,7 +1100,7 @@ app.post('/api/special-activities', async (req, res) => {
       await connection.execute(`
         INSERT INTO training_sessions 
         (week_number, year, course_id, trainer_id, hours, status, activity_type, custom_type, notes, recorded_at, recorded_by)
-        VALUES (?, ?, NULL, ?, ?, 'special_event', ?, ?, ?, ?, 'activity-form')
+        VALUES (?, ?, NULL, ?, ?, 'recorded', ?, ?, ?, ?, 'activity-form')
       `, [
         weekNumber,
         year,
@@ -1138,7 +1138,7 @@ app.delete('/api/special-activities/:activityId', async (req, res) => {
     const [activity] = await pool.execute(`
       SELECT recorded_at, notes
       FROM training_sessions 
-      WHERE id = ? AND course_id IS NULL AND status = 'special_event'
+      WHERE id = ? AND course_id IS NULL AND activity_type IS NOT NULL
     `, [activityId]);
     
     if (activity.length === 0) {
@@ -1151,7 +1151,7 @@ app.delete('/api/special-activities/:activityId', async (req, res) => {
     await pool.execute(`
       DELETE FROM training_sessions 
       WHERE course_id IS NULL 
-        AND status = 'special_event'
+        AND activity_type IS NOT NULL
         AND recorded_at = ?
         AND notes = ?
     `, [recorded_at, notes]);
