@@ -1040,6 +1040,132 @@ app.get('/api/trainer-hours/:year/:month', async (req, res) => {
   }
 });
 
+// ==================== SPECIAL ACTIVITIES (AUSSERPLANMÄSSIGE AKTIVITÄTEN) ====================
+
+// GET /api/special-activities - Alle außerplanmäßigen Aktivitäten laden
+app.get('/api/special-activities', async (req, res) => {
+  try {
+    const [activities] = await pool.execute(`
+      SELECT 
+        ts.id,
+        ts.week_number,
+        ts.year,
+        ts.trainer_id,
+        ts.hours,
+        ts.activity_type,
+        ts.custom_type,
+        ts.notes as title,
+        ts.recorded_at as date,
+        ts.notes,
+        ts.status
+      FROM training_sessions ts
+      WHERE ts.course_id = -1 
+        AND ts.status = 'special_event'
+      ORDER BY ts.recorded_at DESC
+    `);
+    
+    res.json(activities);
+  } catch (error) {
+    console.error('Error loading special activities:', error);
+    res.status(500).json({ error: 'Fehler beim Laden der Aktivitäten' });
+  }
+});
+
+// POST /api/special-activities - Neue außerplanmäßige Aktivität erstellen
+app.post('/api/special-activities', async (req, res) => {
+  const { 
+    date, 
+    weekNumber, 
+    year, 
+    activityType, 
+    customType, 
+    title, 
+    hours, 
+    notes, 
+    trainerIds 
+  } = req.body;
+  
+  // Validierung
+  if (!date || !weekNumber || !year || !activityType || !title || !hours || !trainerIds || trainerIds.length === 0) {
+    return res.status(400).json({ error: 'Fehlende Pflichtfelder' });
+  }
+  
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    // Für jeden Trainer einen separaten Eintrag erstellen
+    for (const trainerId of trainerIds) {
+      await connection.execute(`
+        INSERT INTO training_sessions 
+        (week_number, year, course_id, trainer_id, hours, status, activity_type, custom_type, notes, recorded_at, recorded_by)
+        VALUES (?, ?, -1, ?, ?, 'special_event', ?, ?, ?, ?, 'activity-form')
+      `, [
+        weekNumber,
+        year,
+        trainerId,
+        hours,
+        activityType,
+        activityType === 'sonstiges' ? customType : null,
+        title,
+        date
+      ]);
+    }
+    
+    await connection.commit();
+    
+    res.json({ 
+      success: true, 
+      message: `Aktivität erfolgreich für ${trainerIds.length} Trainer gespeichert` 
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error creating special activity:', error);
+    res.status(500).json({ error: 'Fehler beim Speichern der Aktivität' });
+  } finally {
+    connection.release();
+  }
+});
+
+// DELETE /api/special-activities/:activityId - Aktivität löschen
+app.delete('/api/special-activities/:activityId', async (req, res) => {
+  const { activityId } = req.params;
+  
+  try {
+    // Finde die Aktivität und alle zugehörigen Einträge (gleiche date + title)
+    const [activity] = await pool.execute(`
+      SELECT recorded_at, notes
+      FROM training_sessions 
+      WHERE id = ? AND course_id = -1 AND status = 'special_event'
+    `, [activityId]);
+    
+    if (activity.length === 0) {
+      return res.status(404).json({ error: 'Aktivität nicht gefunden' });
+    }
+    
+    const { recorded_at, notes } = activity[0];
+    
+    // Lösche ALLE Einträge dieser Aktivität (alle Trainer)
+    await pool.execute(`
+      DELETE FROM training_sessions 
+      WHERE course_id = -1 
+        AND status = 'special_event'
+        AND recorded_at = ?
+        AND notes = ?
+    `, [recorded_at, notes]);
+    
+    res.json({ success: true, message: 'Aktivität gelöscht' });
+    
+  } catch (error) {
+    console.error('Error deleting special activity:', error);
+    res.status(500).json({ error: 'Fehler beim Löschen der Aktivität' });
+  }
+});
+
+// ==================== ENDE SPECIAL ACTIVITIES ====================
+
 app.put('/api/training-sessions/:id', async (req, res) => {
   const { id } = req.params;
   const { hours, reason } = req.body;
