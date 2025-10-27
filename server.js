@@ -1056,6 +1056,7 @@ app.get('/api/special-activities', async (req, res) => {
         ts.custom_type,
         ts.notes as title,
         ts.recorded_at as date,
+        ts.day_of_week,
         ts.notes,
         ts.status
       FROM training_sessions ts
@@ -1087,6 +1088,7 @@ app.get('/api/special-activities/week/:weekNumber/:year', async (req, res) => {
         ts.custom_type,
         ts.notes as title,
         ts.recorded_at as date,
+        ts.day_of_week,
         ts.status
       FROM training_sessions ts
       WHERE ts.week_number = ?
@@ -1122,6 +1124,10 @@ app.post('/api/special-activities', async (req, res) => {
     return res.status(400).json({ error: 'Fehlende Pflichtfelder' });
   }
   
+  // v2.6.6: Berechne day_of_week aus Datum
+  const dayNames = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
+  const dayOfWeek = dayNames[new Date(date).getDay()];
+  
   const connection = await pool.getConnection();
   
   try {
@@ -1131,8 +1137,8 @@ app.post('/api/special-activities', async (req, res) => {
     for (const trainerId of trainerIds) {
       await connection.execute(`
         INSERT INTO training_sessions 
-        (week_number, year, course_id, trainer_id, hours, status, activity_type, custom_type, notes, recorded_at, recorded_by)
-        VALUES (?, ?, NULL, ?, ?, 'recorded', ?, ?, ?, ?, 'activity-form')
+        (week_number, year, course_id, trainer_id, hours, status, activity_type, custom_type, notes, recorded_at, day_of_week, recorded_by)
+        VALUES (?, ?, NULL, ?, ?, 'recorded', ?, ?, ?, ?, ?, 'activity-form')
       `, [
         weekNumber,
         year,
@@ -1141,7 +1147,8 @@ app.post('/api/special-activities', async (req, res) => {
         activityType,
         activityType === 'sonstiges' ? customType : null,
         title,
-        date
+        date,
+        dayOfWeek
       ]);
     }
     
@@ -1181,6 +1188,10 @@ app.put('/api/special-activities/:activityId', async (req, res) => {
     return res.status(400).json({ error: 'Fehlende Pflichtfelder' });
   }
   
+  // v2.6.6: Berechne day_of_week aus Datum
+  const dayNames = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
+  const dayOfWeek = dayNames[new Date(date).getDay()];
+  
   const connection = await pool.getConnection();
   
   try {
@@ -1213,8 +1224,8 @@ app.put('/api/special-activities/:activityId', async (req, res) => {
     for (const trainerId of trainerIds) {
       await connection.execute(`
         INSERT INTO training_sessions 
-        (week_number, year, course_id, trainer_id, hours, status, activity_type, custom_type, notes, recorded_at, recorded_by)
-        VALUES (?, ?, NULL, ?, ?, 'recorded', ?, ?, ?, ?, 'activity-form')
+        (week_number, year, course_id, trainer_id, hours, status, activity_type, custom_type, notes, recorded_at, day_of_week, recorded_by)
+        VALUES (?, ?, NULL, ?, ?, 'recorded', ?, ?, ?, ?, ?, 'activity-form')
       `, [
         weekNumber,
         year,
@@ -1223,7 +1234,8 @@ app.put('/api/special-activities/:activityId', async (req, res) => {
         activityType,
         activityType === 'sonstiges' ? customType : null,
         title,
-        date
+        date,
+        dayOfWeek
       ]);
     }
     
