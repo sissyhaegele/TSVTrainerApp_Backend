@@ -577,6 +577,7 @@ app.get('/api/weekly-assignments/batch', async (req, res) => {
   }
 
   try {
+    // Trainer-Zuweisungen laden
     const [assignments] = await pool.query(`
       SELECT wa.id, wa.course_id, wa.week_number, wa.year, wa.trainer_id,
              t.first_name, t.last_name
@@ -586,9 +587,28 @@ app.get('/api/weekly-assignments/batch', async (req, res) => {
       ORDER BY wa.course_id, wa.trainer_id
     `, [weekNumber, year]);
     
+    // Notizen laden
+    const [notes] = await pool.query(`
+      SELECT course_id, note_text
+      FROM training_notes
+      WHERE week_number = ? AND year = ?
+    `, [weekNumber, year]);
+    
+    // Notizen als Map
+    const notesMap = {};
+    notes.forEach(n => {
+      notesMap[n.course_id] = n.note_text;
+    });
+    
+    // Gruppiere Assignments und füge Notizen hinzu
     const groupedAssignments = assignments.reduce((acc, assignment) => {
-      if (!acc[assignment.course_id]) acc[assignment.course_id] = [];
-      acc[assignment.course_id].push({
+      if (!acc[assignment.course_id]) {
+        acc[assignment.course_id] = {
+          trainers: [],
+          note: notesMap[assignment.course_id] || null
+        };
+      }
+      acc[assignment.course_id].trainers.push({
         id: assignment.id,
         trainerId: assignment.trainer_id,
         firstName: assignment.first_name,
@@ -596,6 +616,16 @@ app.get('/api/weekly-assignments/batch', async (req, res) => {
       });
       return acc;
     }, {});
+    
+    // Füge Kurse hinzu, die nur Notizen haben aber keine Trainer
+    Object.keys(notesMap).forEach(courseId => {
+      if (!groupedAssignments[courseId]) {
+        groupedAssignments[courseId] = {
+          trainers: [],
+          note: notesMap[courseId]
+        };
+      }
+    });
     
     res.json(groupedAssignments);
   } catch (error) {
@@ -667,6 +697,134 @@ app.post('/api/weekly-assignments/batch', async (req, res) => {
     res.status(500).json({ error: 'Failed to update weekly assignments', details: error.message });
   } finally {
     connection.release();
+  }
+});
+
+// ==================== TRAINING NOTES v2.5.0 ====================
+
+// POST /api/weekly-assignments/note - Notiz speichern/aktualisieren
+app.post('/api/weekly-assignments/note', async (req, res) => {
+  try {
+    const { course_id, week_number, year, note } = req.body;
+    
+    if (!course_id || !week_number || !year) {
+      return res.status(400).json({ error: 'Missing required fields: course_id, week_number, year' });
+    }
+
+    if (note && note.trim()) {
+      // Notiz speichern oder aktualisieren
+      await pool.query(`
+        INSERT INTO training_notes (course_id, week_number, year, note_text, created_by)
+        VALUES (?, ?, ?, ?, 'web-app')
+        ON DUPLICATE KEY UPDATE note_text = VALUES(note_text), updated_at = CURRENT_TIMESTAMP
+      `, [course_id, week_number, year, note.trim()]);
+      
+      console.log(`📝 Notiz gespeichert: Kurs ${course_id} KW ${week_number}/${year}`);
+      res.json({ success: true, message: 'Notiz gespeichert' });
+    } else {
+      // Leere Notiz = löschen
+      await pool.query(`
+        DELETE FROM training_notes 
+        WHERE course_id = ? AND week_number = ? AND year = ?
+      `, [course_id, week_number, year]);
+      
+      console.log(`🗑️ Notiz gelöscht: Kurs ${course_id} KW ${week_number}/${year}`);
+      res.json({ success: true, message: 'Notiz gelöscht' });
+    }
+  } catch (error) {
+    console.error('Error saving note:', error);
+    res.status(500).json({ error: 'Fehler beim Speichern der Notiz', details: error.message });
+  }
+});
+
+// GET /api/training-notes - Alle Notizen (für Auswertung)
+app.get('/api/training-notes', async (req, res) => {
+  try {
+    const { course_id, week_number, year, from_date, to_date } = req.query;
+    
+    let query = `
+      SELECT tn.*, c.name as course_name, c.day_of_week
+      FROM training_notes tn
+      JOIN courses c ON tn.course_id = c.id
+      WHERE 1=1
+    `;
+    const params = [];
+    
+    if (course_id) {
+      query += ' AND tn.course_id = ?';
+      params.push(course_id);
+    }
+    if (week_number && year) {
+      query += ' AND tn.week_number = ? AND tn.year = ?';
+      params.push(week_number, year);
+    }
+    if (year && !week_number) {
+      query += ' AND tn.year = ?';
+      params.push(year);
+    }
+    if (from_date) {
+      query += ' AND tn.created_at >= ?';
+      params.push(from_date);
+    }
+    if (to_date) {
+      query += ' AND tn.created_at <= ?';
+      params.push(to_date);
+    }
+    
+    query += ' ORDER BY tn.year DESC, tn.week_number DESC, c.name';
+    
+    const [notes] = await pool.query(query, params);
+    res.json(notes);
+  } catch (error) {
+    console.error('Error fetching training notes:', error);
+    res.status(500).json({ error: 'Fehler beim Laden der Notizen', details: error.message });
+  }
+});
+
+// GET /api/training-notes/course/:courseId - Notizen für einen Kurs
+app.get('/api/training-notes/course/:courseId', async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const { year } = req.query;
+    
+    let query = `
+      SELECT tn.*, c.name as course_name
+      FROM training_notes tn
+      JOIN courses c ON tn.course_id = c.id
+      WHERE tn.course_id = ?
+    `;
+    const params = [courseId];
+    
+    if (year) {
+      query += ' AND tn.year = ?';
+      params.push(year);
+    }
+    
+    query += ' ORDER BY tn.year DESC, tn.week_number DESC';
+    
+    const [notes] = await pool.query(query, params);
+    res.json(notes);
+  } catch (error) {
+    console.error('Error fetching course notes:', error);
+    res.status(500).json({ error: 'Fehler beim Laden der Kurs-Notizen', details: error.message });
+  }
+});
+
+// DELETE /api/training-notes/:id - Einzelne Notiz löschen
+app.delete('/api/training-notes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const [result] = await pool.query('DELETE FROM training_notes WHERE id = ?', [id]);
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Notiz nicht gefunden' });
+    }
+    
+    res.json({ success: true, message: 'Notiz gelöscht' });
+  } catch (error) {
+    console.error('Error deleting note:', error);
+    res.status(500).json({ error: 'Fehler beim Löschen der Notiz', details: error.message });
   }
 });
 
