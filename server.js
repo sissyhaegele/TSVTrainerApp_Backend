@@ -1509,6 +1509,223 @@ app.delete('/api/training-sessions/:id', async (req, res) => {
   }
 });
 
+// ÖFFENTLICHER KURSPLAN - Eltern/Teilnehmer Ansicht
+
+// GET /api/public/kursplan - Öffentlicher Wochenplan (KEIN LOGIN!)
+app.get('/api/public/kursplan', async (req, res) => {
+  try {
+    const weekNumber = parseInt(req.query.week) || getISOWeekNumber(new Date());
+    const year = parseInt(req.query.year) || new Date().getFullYear();
+
+    console.log(`📅 Öffentlicher Kursplan abgerufen: KW ${weekNumber}/${year}`);
+
+    // 1. Prüfen ob Ferienwoche
+    const [holidayRows] = await pool.query(
+      'SELECT * FROM holiday_weeks WHERE week_number = ? AND year = ?',
+      [weekNumber, year]
+    );
+    const isHolidayWeek = holidayRows.length > 0;
+    const holidayName = isHolidayWeek ? (holidayRows[0].name || 'Ferien') : null;
+
+    // 2. Alle aktiven Kurse laden
+    const [courses] = await pool.query(`
+      SELECT 
+        c.id,
+        c.name,
+        c.day_of_week,
+        c.start_time,
+        c.end_time,
+        c.location,
+        c.category
+      FROM courses c
+      WHERE c.is_active = 1
+      ORDER BY 
+        FIELD(c.day_of_week, 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'),
+        c.start_time
+    `);
+
+    // 3. Ausgefallene Kurse für diese Woche
+    const [cancelledCourses] = await pool.query(
+      'SELECT course_id, reason FROM cancelled_courses WHERE week_number = ? AND year = ?',
+      [weekNumber, year]
+    );
+    const cancelledMap = new Map(cancelledCourses.map(c => [c.course_id, c.reason]));
+
+    // 4. Trainer-Zuweisungen für diese Woche laden
+    const [assignments] = await pool.query(`
+      SELECT 
+        wa.course_id,
+        t.id as trainer_id,
+        t.first_name,
+        t.last_name
+      FROM weekly_assignments wa
+      JOIN trainers t ON wa.trainer_id = t.id
+      WHERE wa.week_number = ? AND wa.year = ?
+    `, [weekNumber, year]);
+
+    // Assignments nach Kurs gruppieren
+    const assignmentMap = new Map();
+    assignments.forEach(a => {
+      if (!assignmentMap.has(a.course_id)) {
+        assignmentMap.set(a.course_id, []);
+      }
+      assignmentMap.get(a.course_id).push({
+        firstName: a.first_name,
+        lastName: a.last_name
+      });
+    });
+
+    // 5. Falls keine Zuweisungen für einen Kurs: Default-Trainer laden
+    const coursesWithoutAssignments = courses
+      .filter(c => !assignmentMap.has(c.id))
+      .map(c => c.id);
+
+    if (coursesWithoutAssignments.length > 0) {
+      const placeholders = coursesWithoutAssignments.map(() => '?').join(',');
+      const [defaults] = await pool.query(`
+        SELECT 
+          ct.course_id,
+          t.first_name,
+          t.last_name
+        FROM course_trainers ct
+        JOIN trainers t ON ct.trainer_id = t.id
+        WHERE ct.course_id IN (${placeholders})
+      `, coursesWithoutAssignments);
+
+      defaults.forEach(d => {
+        if (!assignmentMap.has(d.course_id)) {
+          assignmentMap.set(d.course_id, []);
+        }
+        assignmentMap.get(d.course_id).push({
+          firstName: d.first_name,
+          lastName: d.last_name
+        });
+      });
+    }
+
+    // 6. Wochentag-Konvertierung (English -> German)
+    const dayMapToGerman = {
+      'Monday': 'Montag',
+      'Tuesday': 'Dienstag',
+      'Wednesday': 'Mittwoch',
+      'Thursday': 'Donnerstag',
+      'Friday': 'Freitag',
+      'Saturday': 'Samstag',
+      'Sunday': 'Sonntag'
+    };
+
+    // 7. Response zusammenbauen
+    const schedule = courses.map(course => {
+      const isCancelled = cancelledMap.has(course.id);
+      const cancelReason = cancelledMap.get(course.id) || null;
+      
+      // Kurs fällt aus wenn: explizit gecancelled ODER Ferienwoche
+      const isOff = isCancelled || isHolidayWeek;
+      
+      let status = 'findet statt';
+      let statusReason = null;
+      
+      if (isCancelled) {
+        status = 'fällt aus';
+        statusReason = cancelReason || 'Ausfall';
+      } else if (isHolidayWeek) {
+        status = 'fällt aus';
+        statusReason = holidayName;
+      }
+
+      const trainers = assignmentMap.get(course.id) || [];
+      const germanDay = dayMapToGerman[course.day_of_week] || course.day_of_week;
+
+      return {
+        id: course.id,
+        name: course.name,
+        dayOfWeek: germanDay,
+        startTime: course.start_time?.slice(0, 5),
+        endTime: course.end_time?.slice(0, 5),
+        location: course.location || '',
+        category: course.category || '',
+        trainers: trainers.map(t => `${t.firstName} ${t.lastName}`),
+        status: status,
+        statusReason: statusReason,
+        isOff: isOff
+      };
+    });
+
+    // 8. Nach Wochentag gruppieren
+    const scheduleByDay = {
+      Montag: [],
+      Dienstag: [],
+      Mittwoch: [],
+      Donnerstag: [],
+      Freitag: [],
+      Samstag: [],
+      Sonntag: []
+    };
+
+    schedule.forEach(course => {
+      if (scheduleByDay[course.dayOfWeek]) {
+        scheduleByDay[course.dayOfWeek].push(course);
+      }
+    });
+
+    // 9. Wochendaten berechnen (für Anzeige "Mo 02.12. - So 08.12.")
+    const weekDates = getWeekDates(weekNumber, year);
+
+    res.json({
+      success: true,
+      weekNumber,
+      year,
+      isHolidayWeek,
+      holidayName,
+      weekDates,
+      schedule: scheduleByDay,
+      generatedAt: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Error fetching public schedule:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Fehler beim Laden des Kursplans' 
+    });
+  }
+});
+
+// Hilfsfunktion: ISO Kalenderwoche berechnen
+function getISOWeekNumber(date) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+}
+
+// Hilfsfunktion: Start- und Enddatum einer Woche berechnen
+function getWeekDates(weekNumber, year) {
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const dayNum = jan4.getUTCDay() || 7;
+  jan4.setUTCDate(jan4.getUTCDate() - dayNum + 1); // Montag der KW1
+  
+  const weekStart = new Date(jan4);
+  weekStart.setUTCDate(jan4.getUTCDate() + (weekNumber - 1) * 7);
+  
+  const weekEnd = new Date(weekStart);
+  weekEnd.setUTCDate(weekStart.getUTCDate() + 6);
+  
+  const formatDate = (d) => {
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+    return `${day}.${month}.`;
+  };
+  
+  return {
+    start: formatDate(weekStart),
+    end: formatDate(weekEnd),
+    startFull: weekStart.toISOString().slice(0, 10),
+    endFull: weekEnd.toISOString().slice(0, 10)
+  };
+}
+
 // ==================== UTILITY ====================
 
 app.get('/api/health', async (req, res) => {
