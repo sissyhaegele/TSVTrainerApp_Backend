@@ -587,17 +587,25 @@ app.get('/api/weekly-assignments/batch', async (req, res) => {
       ORDER BY wa.course_id, wa.trainer_id
     `, [weekNumber, year]);
     
-    // Notizen laden
+    // Notizen laden (v2.8.0: ALLE Notizen, nicht nur eine pro Kurs)
     const [notes] = await pool.query(`
-      SELECT course_id, note_text
+      SELECT id, course_id, note_type, note_text
       FROM training_notes
       WHERE week_number = ? AND year = ?
+      ORDER BY created_at ASC
     `, [weekNumber, year]);
     
-    // Notizen als Map
+    // Notizen nach course_id gruppieren (Array statt einzelner String)
     const notesMap = {};
     notes.forEach(n => {
-      notesMap[n.course_id] = n.note_text;
+      if (!notesMap[n.course_id]) {
+        notesMap[n.course_id] = [];
+      }
+      notesMap[n.course_id].push({
+        id: n.id,
+        note_type: n.note_type,
+        note: n.note_text
+      });
     });
     
     // Gruppiere Assignments und füge Notizen hinzu
@@ -605,7 +613,7 @@ app.get('/api/weekly-assignments/batch', async (req, res) => {
       if (!acc[assignment.course_id]) {
         acc[assignment.course_id] = {
           trainers: [],
-          note: notesMap[assignment.course_id] || null
+          notes: notesMap[assignment.course_id] || []
         };
       }
       acc[assignment.course_id].trainers.push({
@@ -622,10 +630,12 @@ app.get('/api/weekly-assignments/batch', async (req, res) => {
       if (!groupedAssignments[courseId]) {
         groupedAssignments[courseId] = {
           trainers: [],
-          note: notesMap[courseId]
+          notes: notesMap[courseId]
         };
       }
     });
+    
+    res.json(groupedAssignments);
     
     res.json(groupedAssignments);
   } catch (error) {
@@ -702,7 +712,8 @@ app.post('/api/weekly-assignments/batch', async (req, res) => {
 
 // ==================== TRAINING NOTES v2.5.0 ====================
 
-// POST /api/weekly-assignments/note - Notiz speichern/aktualisieren
+// POST /api/weekly-assignments/note - DEPRECATED in v2.8.0
+// Wird für Rückwärtskompatibilität beibehalten, erstellt interne Notizen
 app.post('/api/weekly-assignments/note', async (req, res) => {
   try {
     const { course_id, week_number, year, note } = req.body;
@@ -712,24 +723,16 @@ app.post('/api/weekly-assignments/note', async (req, res) => {
     }
 
     if (note && note.trim()) {
-      // Notiz speichern oder aktualisieren
+      // v2.8.0: Neue Notiz als 'internal' erstellen
       await pool.query(`
-        INSERT INTO training_notes (course_id, week_number, year, note_text, created_by)
-        VALUES (?, ?, ?, ?, 'web-app')
-        ON DUPLICATE KEY UPDATE note_text = VALUES(note_text), updated_at = CURRENT_TIMESTAMP
+        INSERT INTO training_notes (course_id, week_number, year, note_type, note_text, created_by)
+        VALUES (?, ?, ?, 'internal', ?, 'web-app')
       `, [course_id, week_number, year, note.trim()]);
       
       console.log(`📝 Notiz gespeichert: Kurs ${course_id} KW ${week_number}/${year}`);
       res.json({ success: true, message: 'Notiz gespeichert' });
     } else {
-      // Leere Notiz = löschen
-      await pool.query(`
-        DELETE FROM training_notes 
-        WHERE course_id = ? AND week_number = ? AND year = ?
-      `, [course_id, week_number, year]);
-      
-      console.log(`🗑️ Notiz gelöscht: Kurs ${course_id} KW ${week_number}/${year}`);
-      res.json({ success: true, message: 'Notiz gelöscht' });
+      res.json({ success: true, message: 'Keine Notiz zum Speichern' });
     }
   } catch (error) {
     console.error('Error saving note:', error);
@@ -737,6 +740,158 @@ app.post('/api/weekly-assignments/note', async (req, res) => {
   }
 });
 
+// ==================== v2.8.0 NOTES API ====================
+
+// GET /api/notes/week - Alle Notizen für eine Woche (v2.8.0)
+app.get('/api/notes/week', async (req, res) => {
+  try {
+    const { week, year } = req.query;
+    
+    if (!week || !year) {
+      return res.status(400).json({ error: 'week und year sind erforderlich' });
+    }
+    
+    const [notes] = await pool.query(`
+      SELECT id, course_id, week_number, year, note_type, note_text as note, created_at, updated_at
+      FROM training_notes 
+      WHERE week_number = ? AND year = ?
+      ORDER BY course_id, created_at ASC
+    `, [week, year]);
+    
+    // Gruppiert nach course_id zurückgeben
+    const grouped = notes.reduce((acc, note) => {
+      if (!acc[note.course_id]) {
+        acc[note.course_id] = [];
+      }
+      acc[note.course_id].push(note);
+      return acc;
+    }, {});
+    
+    res.json({ notes, grouped });
+  } catch (error) {
+    console.error('Fehler beim Laden der Wochen-Notizen:', error);
+    res.status(500).json({ error: 'Fehler beim Laden der Notizen' });
+  }
+});
+
+// GET /api/notes - Notizen für einen Kurs (v2.8.0)
+app.get('/api/notes', async (req, res) => {
+  try {
+    const { course_id, week, year } = req.query;
+    
+    if (!course_id || !week || !year) {
+      return res.status(400).json({ error: 'course_id, week und year sind erforderlich' });
+    }
+    
+    const [notes] = await pool.query(`
+      SELECT id, course_id, week_number, year, note_type, note_text as note, created_at, updated_at
+      FROM training_notes 
+      WHERE course_id = ? AND week_number = ? AND year = ?
+      ORDER BY created_at ASC
+    `, [course_id, week, year]);
+    
+    res.json(notes);
+  } catch (error) {
+    console.error('Fehler beim Laden der Notizen:', error);
+    res.status(500).json({ error: 'Fehler beim Laden der Notizen' });
+  }
+});
+
+// POST /api/notes - Neue Notiz anlegen (v2.8.0)
+app.post('/api/notes', async (req, res) => {
+  try {
+    const { course_id, week, year, note_type, note } = req.body;
+    
+    if (!course_id || !week || !year || !note_type || !note) {
+      return res.status(400).json({ 
+        error: 'Alle Felder sind erforderlich (course_id, week, year, note_type, note)' 
+      });
+    }
+    
+    if (!['internal', 'public'].includes(note_type)) {
+      return res.status(400).json({ 
+        error: 'note_type muss "internal" oder "public" sein' 
+      });
+    }
+    
+    const [result] = await pool.query(`
+      INSERT INTO training_notes (course_id, week_number, year, note_type, note_text, created_by)
+      VALUES (?, ?, ?, ?, ?, 'web-app')
+    `, [course_id, week, year, note_type, note.trim()]);
+    
+    // Neue Notiz zurückgeben
+    const [newNote] = await pool.query(
+      'SELECT id, course_id, week_number, year, note_type, note_text as note, created_at, updated_at FROM training_notes WHERE id = ?',
+      [result.insertId]
+    );
+    
+    console.log(`📝 Neue Notiz erstellt: ID ${result.insertId}, Typ: ${note_type}`);
+    res.status(201).json(newNote[0]);
+  } catch (error) {
+    console.error('Fehler beim Erstellen der Notiz:', error);
+    res.status(500).json({ error: 'Fehler beim Erstellen der Notiz' });
+  }
+});
+
+// PUT /api/notes/:id - Notiz bearbeiten (v2.8.0)
+app.put('/api/notes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { note_type, note } = req.body;
+    
+    if (!note_type || !note) {
+      return res.status(400).json({ error: 'note_type und note sind erforderlich' });
+    }
+    
+    if (!['internal', 'public'].includes(note_type)) {
+      return res.status(400).json({ 
+        error: 'note_type muss "internal" oder "public" sein' 
+      });
+    }
+    
+    const [result] = await pool.query(`
+      UPDATE training_notes 
+      SET note_type = ?, note_text = ?, updated_at = NOW()
+      WHERE id = ?
+    `, [note_type, note.trim(), id]);
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Notiz nicht gefunden' });
+    }
+    
+    const [updated] = await pool.query(
+      'SELECT id, course_id, week_number, year, note_type, note_text as note, created_at, updated_at FROM training_notes WHERE id = ?',
+      [id]
+    );
+    
+    console.log(`📝 Notiz aktualisiert: ID ${id}`);
+    res.json(updated[0]);
+  } catch (error) {
+    console.error('Fehler beim Aktualisieren der Notiz:', error);
+    res.status(500).json({ error: 'Fehler beim Aktualisieren der Notiz' });
+  }
+});
+
+// DELETE /api/notes/:id - Notiz löschen (v2.8.0)
+app.delete('/api/notes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const [result] = await pool.query('DELETE FROM training_notes WHERE id = ?', [id]);
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Notiz nicht gefunden' });
+    }
+    
+    console.log(`🗑️ Notiz gelöscht: ID ${id}`);
+    res.json({ success: true, message: 'Notiz gelöscht' });
+  } catch (error) {
+    console.error('Fehler beim Löschen der Notiz:', error);
+    res.status(500).json({ error: 'Fehler beim Löschen der Notiz' });
+  }
+});
+
+// ==================== END v2.8.0 NOTES API ====================
 // GET /api/training-notes - Alle Notizen (für Auswertung)
 app.get('/api/training-notes', async (req, res) => {
   try {
@@ -1551,6 +1706,23 @@ app.get('/api/public/kursplan', async (req, res) => {
     );
     const cancelledMap = new Map(cancelledCourses.map(c => [c.course_id, c.reason]));
 
+    // v2.8.0: Öffentliche Notizen laden
+    const [publicNotes] = await pool.query(`
+      SELECT course_id, note_text
+      FROM training_notes
+      WHERE week_number = ? AND year = ? AND note_type = 'public'
+      ORDER BY created_at ASC
+    `, [weekNumber, year]);
+    
+    // Notizen nach course_id gruppieren
+    const publicNotesMap = {};
+    publicNotes.forEach(n => {
+      if (!publicNotesMap[n.course_id]) {
+        publicNotesMap[n.course_id] = [];
+      }
+      publicNotesMap[n.course_id].push(n.note_text);
+    });
+
     // 4. Trainer-Zuweisungen für diese Woche laden
     const [assignments] = await pool.query(`
       SELECT 
@@ -1647,7 +1819,8 @@ app.get('/api/public/kursplan', async (req, res) => {
         trainers: trainers.map(t => `${t.firstName} ${t.lastName}`),
         status: status,
         statusReason: statusReason,
-        isOff: isOff
+        isOff: isOff,
+        public_notes: publicNotesMap[course.id] || []
       };
     });
 
