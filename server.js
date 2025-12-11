@@ -636,8 +636,6 @@ app.get('/api/weekly-assignments/batch', async (req, res) => {
     });
     
     res.json(groupedAssignments);
-    
-    res.json(groupedAssignments);
   } catch (error) {
     console.error('Error fetching batch weekly assignments:', error);
     res.status(500).json({ error: 'Failed to fetch weekly assignments', details: error.message });
