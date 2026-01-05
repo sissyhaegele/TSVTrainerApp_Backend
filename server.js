@@ -1975,7 +1975,7 @@ app.get('/api/reports/trainer-hours', async (req, res) => {
        JOIN trainers t ON ts.trainer_id = t.id
        WHERE ts.year = ? AND ts.status = 'recorded'
        GROUP BY t.id, t.first_name, t.last_name
-       ORDER BY total_hours DESC`,
+       ORDER BY t.last_name, t.first_name`,
       [parseInt(year)]
     );
     
@@ -2060,6 +2060,115 @@ app.get('/api/reports/hall-usage', async (req, res) => {
   }
 });
 
+// Trainer-Stunden für einen Zeitraum (von-bis)
+app.get('/api/reports/trainer-hours-range', async (req, res) => {
+  const { start, end } = req.query;
+  
+  if (!start || !end) {
+    return res.status(400).json({ error: 'Start- und End-Datum erforderlich' });
+  }
+  
+  try {
+    const [results] = await pool.query(
+      `SELECT 
+         t.id,
+         t.first_name,
+         t.last_name,
+         ROUND(SUM(ts.hours), 1) as total_hours,
+         COUNT(DISTINCT CONCAT(ts.week_number, '-', ts.year)) as training_weeks,
+         COUNT(ts.id) as session_count
+       FROM training_sessions ts
+       JOIN trainers t ON ts.trainer_id = t.id
+       WHERE ts.recorded_at BETWEEN ? AND ?
+         AND ts.status = 'recorded'
+       GROUP BY t.id, t.first_name, t.last_name
+       ORDER BY t.last_name, t.first_name`,
+      [start, end]
+    );
+    
+    const formattedResults = results.map(row => ({
+      id: row.id,
+      name: `${row.first_name} ${row.last_name}`,
+      firstName: row.first_name,
+      lastName: row.last_name,
+      totalHours: parseFloat(row.total_hours) || 0,
+      trainingWeeks: row.training_weeks || 0,
+      sessionCount: row.session_count || 0
+    }));
+    
+    const totalSum = formattedResults.reduce((sum, t) => sum + t.totalHours, 0);
+    
+    res.json({
+      success: true,
+      startDate: start,
+      endDate: end,
+      trainers: formattedResults,
+      summary: {
+        totalHours: Math.round(totalSum * 10) / 10,
+        trainerCount: formattedResults.length
+      }
+    });
+    
+  } catch (error) {
+    console.error('Fehler bei Trainer-Zeitraum:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Hallen-Auslastung für einen Zeitraum (von-bis)
+app.get('/api/reports/hall-usage-range', async (req, res) => {
+  const { start, end } = req.query;
+  
+  if (!start || !end) {
+    return res.status(400).json({ error: 'Start- und End-Datum erforderlich' });
+  }
+  
+  try {
+    const [results] = await pool.query(
+      `SELECT 
+         c.location,
+         ROUND(SUM(ts.hours), 1) as total_hours,
+         COUNT(DISTINCT c.id) as course_count,
+         COUNT(DISTINCT CONCAT(ts.week_number, '-', ts.year)) as training_weeks,
+         COUNT(ts.id) as session_count
+       FROM training_sessions ts
+       JOIN courses c ON ts.course_id = c.id
+       WHERE ts.recorded_at BETWEEN ? AND ?
+         AND ts.status = 'recorded'
+         AND c.location IS NOT NULL
+         AND c.location != ''
+       GROUP BY c.location
+       ORDER BY total_hours DESC`,
+      [start, end]
+    );
+    
+    const formattedResults = results.map(row => ({
+      location: row.location,
+      totalHours: parseFloat(row.total_hours) || 0,
+      courseCount: row.course_count || 0,
+      trainingWeeks: row.training_weeks || 0,
+      sessionCount: row.session_count || 0
+    }));
+    
+    const totalSum = formattedResults.reduce((sum, h) => sum + h.totalHours, 0);
+    
+    res.json({
+      success: true,
+      startDate: start,
+      endDate: end,
+      halls: formattedResults,
+      summary: {
+        totalHours: Math.round(totalSum * 10) / 10,
+        hallCount: formattedResults.length
+      }
+    });
+    
+  } catch (error) {
+    console.error('Fehler bei Hallen-Zeitraum:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== ERROR HANDLERS ====================
 
 app.use((req, res) => {
@@ -2072,10 +2181,11 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 TSV Rot Trainer API v2.9.0 running on port ${PORT}`);
-  console.log(`✅ NEW in v2.9.0: Reports-Endpoints für Jahresberichte`);
-  console.log(`   - GET /api/reports/trainer-hours?year=YYYY`);
-  console.log(`   - GET /api/reports/hall-usage?year=YYYY`);
+  console.log(`🚀 TSV Rot Trainer API v2.10.0 running on port ${PORT}`);
+  console.log(`✅ NEW in v2.10.0: Zeitraum-Analyse & alphabetische Sortierung`);
+  console.log(`   - GET /api/reports/trainer-hours-range?start=YYYY-MM-DD&end=YYYY-MM-DD`);
+  console.log(`   - GET /api/reports/hall-usage-range?start=YYYY-MM-DD&end=YYYY-MM-DD`);
+  console.log(`   - Trainer alphabetisch sortiert`);
 });
 app.get('/api/trainer-hours/:trainerId/:year', async (req, res) => {
   const { trainerId, year } = req.params;
