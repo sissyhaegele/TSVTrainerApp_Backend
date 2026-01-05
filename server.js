@@ -1610,31 +1610,134 @@ app.delete('/api/special-activities/:activityId', async (req, res) => {
 app.get('/api/weekly-activities/:year/:week', async (req, res) => {
   const { year, week } = req.params;
   
+  console.log(`📅 Weekly Activities Request: KW ${week}/${year}`);
+  
   try {
     const [activities] = await pool.execute(`
       SELECT 
         ts.id,
+        ts.week_number,
+        ts.year,
+        ts.trainer_id,
         ts.recorded_at as date,
+        ts.day_of_week,
         ts.activity_type,
         ts.custom_type,
         ts.notes as title,
         ts.hours,
         ts.visibility,
-        GROUP_CONCAT(DISTINCT CONCAT(t.first_name, ' ', t.last_name) ORDER BY t.last_name SEPARATOR ', ') as trainer_names
+        ts.status,
+        CONCAT(t.first_name, ' ', t.last_name) as trainer_names
       FROM training_sessions ts
       LEFT JOIN trainers t ON ts.trainer_id = t.id
       WHERE ts.week_number = ?
         AND ts.year = ?
         AND ts.course_id IS NULL 
         AND ts.activity_type IS NOT NULL
-      GROUP BY ts.recorded_at, ts.notes, ts.activity_type, ts.hours, ts.visibility
-      ORDER BY ts.recorded_at ASC
+      ORDER BY ts.recorded_at ASC, ts.id ASC
     `, [parseInt(week), parseInt(year)]);
+    
+    console.log(`✅ Found ${activities.length} activities for KW ${week}/${year}`);
     
     res.json(activities);
   } catch (error) {
     console.error('Error loading weekly activities:', error);
-    res.status(500).json({ error: 'Failed to fetch weekly activities' });
+    res.status(500).json({ error: 'Failed to fetch weekly activities', details: error.message });
+  }
+});
+
+// ==================== COURSE EXCEPTIONS (Ferien-Override) ====================
+
+// GET /api/course-exceptions - Kurs-Ausnahmen für Ferienwochen laden
+app.get('/api/course-exceptions', async (req, res) => {
+  const { weekNumber, year } = req.query;
+  
+  try {
+    // Prüfe ob Tabelle existiert
+    const [tables] = await pool.execute(`
+      SELECT TABLE_NAME 
+      FROM information_schema.TABLES 
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'course_exceptions'
+    `);
+    
+    if (tables.length === 0) {
+      // Tabelle existiert nicht - erstelle sie
+      await pool.execute(`
+        CREATE TABLE IF NOT EXISTS course_exceptions (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          course_id INT NOT NULL,
+          week_number INT NOT NULL,
+          year INT NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE KEY unique_exception (course_id, week_number, year),
+          FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
+        )
+      `);
+      console.log('✅ course_exceptions Tabelle erstellt');
+      return res.json([]);
+    }
+    
+    const [exceptions] = await pool.execute(`
+      SELECT course_id, week_number, year
+      FROM course_exceptions
+      WHERE week_number = ? AND year = ?
+    `, [parseInt(weekNumber), parseInt(year)]);
+    
+    res.json(exceptions);
+  } catch (error) {
+    console.error('Error loading course exceptions:', error);
+    res.json([]); // Bei Fehler leeres Array statt 500
+  }
+});
+
+// POST /api/course-exceptions - Kurs-Ausnahme hinzufügen (Kurs findet trotz Ferien statt)
+app.post('/api/course-exceptions', async (req, res) => {
+  const { course_id, week_number, year } = req.body;
+  
+  try {
+    // Erstelle Tabelle falls nicht vorhanden
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS course_exceptions (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        course_id INT NOT NULL,
+        week_number INT NOT NULL,
+        year INT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_exception (course_id, week_number, year),
+        FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
+      )
+    `);
+    
+    await pool.execute(`
+      INSERT INTO course_exceptions (course_id, week_number, year)
+      VALUES (?, ?, ?)
+      ON DUPLICATE KEY UPDATE id = id
+    `, [course_id, week_number, year]);
+    
+    console.log(`✅ Course Exception: Kurs ${course_id} findet in KW ${week_number}/${year} statt`);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error adding course exception:', error);
+    res.status(500).json({ error: 'Fehler beim Hinzufügen der Ausnahme' });
+  }
+});
+
+// DELETE /api/course-exceptions - Kurs-Ausnahme entfernen
+app.delete('/api/course-exceptions', async (req, res) => {
+  const { course_id, week_number, year } = req.query;
+  
+  try {
+    await pool.execute(`
+      DELETE FROM course_exceptions
+      WHERE course_id = ? AND week_number = ? AND year = ?
+    `, [parseInt(course_id), parseInt(week_number), parseInt(year)]);
+    
+    console.log(`🗑️ Course Exception entfernt: Kurs ${course_id} in KW ${week_number}/${year}`);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error removing course exception:', error);
+    res.status(500).json({ error: 'Fehler beim Entfernen der Ausnahme' });
   }
 });
 
