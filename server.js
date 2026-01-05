@@ -1906,7 +1906,7 @@ app.get('/api/health', async (req, res) => {
       status: 'OK', 
       database: 'Connected',
       timestamp: new Date().toISOString(),
-      version: '2.5.1',
+      version: '2.9.0',
       features: [
         'stunden-tracking',
         'tagesgenau',
@@ -1944,10 +1944,120 @@ app.get('/', (req, res) => {
       weeklyAssignments: '/api/weekly-assignments',
       cancelledCourses: '/api/cancelled-courses',
       holidayWeeks: '/api/holiday-weeks',
-      trainerHoursYear: '/api/trainer-hours/:year'
+      trainerHoursYear: '/api/trainer-hours/:year',
+      reportsTrainerHours: 'GET /api/reports/trainer-hours?year=YYYY',
+      reportsHallUsage: 'GET /api/reports/hall-usage?year=YYYY'
     },
-    newInV251: 'sync-past-days Endpoint - synct alle Trainer in Vergangenheit tagesgenau'
+    newInV290: 'Reports: Jahresberichte für Trainer-Stunden und Hallen-Auslastung'
   });
+});
+
+// ==================== REPORTS ENDPOINTS ====================
+
+// Alle Trainer-Stunden für ein Jahr
+app.get('/api/reports/trainer-hours', async (req, res) => {
+  const { year } = req.query;
+  
+  if (!year) {
+    return res.status(400).json({ error: 'Jahr-Parameter fehlt' });
+  }
+  
+  try {
+    const [results] = await pool.query(
+      `SELECT 
+         t.id,
+         t.first_name,
+         t.last_name,
+         ROUND(SUM(ts.hours), 1) as total_hours,
+         COUNT(DISTINCT CONCAT(ts.week_number, '-', ts.year)) as training_weeks,
+         COUNT(ts.id) as session_count
+       FROM training_sessions ts
+       JOIN trainers t ON ts.trainer_id = t.id
+       WHERE ts.year = ? AND ts.status = 'recorded'
+       GROUP BY t.id, t.first_name, t.last_name
+       ORDER BY total_hours DESC`,
+      [parseInt(year)]
+    );
+    
+    const formattedResults = results.map(row => ({
+      id: row.id,
+      name: `${row.first_name} ${row.last_name}`,
+      firstName: row.first_name,
+      lastName: row.last_name,
+      totalHours: parseFloat(row.total_hours) || 0,
+      trainingWeeks: row.training_weeks || 0,
+      sessionCount: row.session_count || 0
+    }));
+    
+    const totalSum = formattedResults.reduce((sum, t) => sum + t.totalHours, 0);
+    
+    res.json({
+      success: true,
+      year: parseInt(year),
+      trainers: formattedResults,
+      summary: {
+        totalHours: Math.round(totalSum * 10) / 10,
+        trainerCount: formattedResults.length
+      }
+    });
+    
+  } catch (error) {
+    console.error('Fehler bei Trainer-Jahresstunden:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Hallen-Auslastung für ein Jahr
+app.get('/api/reports/hall-usage', async (req, res) => {
+  const { year } = req.query;
+  
+  if (!year) {
+    return res.status(400).json({ error: 'Jahr-Parameter fehlt' });
+  }
+  
+  try {
+    const [results] = await pool.query(
+      `SELECT 
+         c.location,
+         ROUND(SUM(ts.hours), 1) as total_hours,
+         COUNT(DISTINCT c.id) as course_count,
+         COUNT(DISTINCT CONCAT(ts.week_number, '-', ts.year)) as training_weeks,
+         COUNT(ts.id) as session_count
+       FROM training_sessions ts
+       JOIN courses c ON ts.course_id = c.id
+       WHERE ts.year = ? 
+         AND ts.status = 'recorded'
+         AND c.location IS NOT NULL
+         AND c.location != ''
+       GROUP BY c.location
+       ORDER BY total_hours DESC`,
+      [parseInt(year)]
+    );
+    
+    const formattedResults = results.map(row => ({
+      location: row.location,
+      totalHours: parseFloat(row.total_hours) || 0,
+      courseCount: row.course_count || 0,
+      trainingWeeks: row.training_weeks || 0,
+      sessionCount: row.session_count || 0
+    }));
+    
+    const totalSum = formattedResults.reduce((sum, h) => sum + h.totalHours, 0);
+    
+    res.json({
+      success: true,
+      year: parseInt(year),
+      halls: formattedResults,
+      summary: {
+        totalHours: Math.round(totalSum * 10) / 10,
+        hallCount: formattedResults.length
+      }
+    });
+    
+  } catch (error) {
+    console.error('Fehler bei Hallen-Auslastung:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ==================== ERROR HANDLERS ====================
@@ -1962,8 +2072,10 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 TSV Rot Trainer API v2.5.1 running on port ${PORT}`);
-  console.log(`✅ NEW: POST /api/training-sessions/sync-past-days - Synct alle Trainer in Vergangenheit`);
+  console.log(`🚀 TSV Rot Trainer API v2.9.0 running on port ${PORT}`);
+  console.log(`✅ NEW in v2.9.0: Reports-Endpoints für Jahresberichte`);
+  console.log(`   - GET /api/reports/trainer-hours?year=YYYY`);
+  console.log(`   - GET /api/reports/hall-usage?year=YYYY`);
 });
 app.get('/api/trainer-hours/:trainerId/:year', async (req, res) => {
   const { trainerId, year } = req.params;
