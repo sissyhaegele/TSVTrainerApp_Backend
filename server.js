@@ -2069,6 +2069,22 @@ app.get('/api/reports/trainer-hours-range', async (req, res) => {
   }
   
   try {
+    // Berechne Start- und End-KW aus Datumsangaben
+    const startDate = new Date(start);
+    const endDate = new Date(end);
+    
+    // ISO Week berechnen
+    const getISOWeek = (date) => {
+      const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+      const dayNum = d.getUTCDay() || 7;
+      d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+      const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+      return { week: Math.ceil((((d - yearStart) / 86400000) + 1) / 7), year: d.getUTCFullYear() };
+    };
+    
+    const startWeek = getISOWeek(startDate);
+    const endWeek = getISOWeek(endDate);
+    
     const [results] = await pool.query(
       `SELECT 
          t.id,
@@ -2079,11 +2095,13 @@ app.get('/api/reports/trainer-hours-range', async (req, res) => {
          COUNT(ts.id) as session_count
        FROM training_sessions ts
        JOIN trainers t ON ts.trainer_id = t.id
-       WHERE ts.recorded_at BETWEEN ? AND ?
+       WHERE ((ts.year = ? AND ts.week_number >= ?) OR ts.year > ?)
+         AND ((ts.year = ? AND ts.week_number <= ?) OR ts.year < ?)
          AND ts.status = 'recorded'
        GROUP BY t.id, t.first_name, t.last_name
        ORDER BY t.last_name, t.first_name`,
-      [start, end]
+      [startWeek.year, startWeek.week, startWeek.year, 
+       endWeek.year, endWeek.week, endWeek.year]
     );
     
     const formattedResults = results.map(row => ({
@@ -2124,6 +2142,23 @@ app.get('/api/reports/hall-usage-range', async (req, res) => {
   }
   
   try {
+    // Berechne Start- und End-KW aus Datumsangaben
+    const startDate = new Date(start);
+    const endDate = new Date(end);
+    
+    // ISO Week berechnen
+    const getISOWeek = (date) => {
+      const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+      const dayNum = d.getUTCDay() || 7;
+      d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+      const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+      return { week: Math.ceil((((d - yearStart) / 86400000) + 1) / 7), year: d.getUTCFullYear() };
+    };
+    
+    const startWeek = getISOWeek(startDate);
+    const endWeek = getISOWeek(endDate);
+    
+    // Query mit Wochen-Filter
     const [results] = await pool.query(
       `SELECT 
          c.location,
@@ -2133,13 +2168,15 @@ app.get('/api/reports/hall-usage-range', async (req, res) => {
          COUNT(ts.id) as session_count
        FROM training_sessions ts
        JOIN courses c ON ts.course_id = c.id
-       WHERE ts.recorded_at BETWEEN ? AND ?
+       WHERE ((ts.year = ? AND ts.week_number >= ?) OR ts.year > ?)
+         AND ((ts.year = ? AND ts.week_number <= ?) OR ts.year < ?)
          AND ts.status = 'recorded'
          AND c.location IS NOT NULL
          AND c.location != ''
        GROUP BY c.location
        ORDER BY total_hours DESC`,
-      [start, end]
+      [startWeek.year, startWeek.week, startWeek.year, 
+       endWeek.year, endWeek.week, endWeek.year]
     );
     
     const formattedResults = results.map(row => ({
@@ -2181,8 +2218,8 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 TSV Rot Trainer API v2.10.0 running on port ${PORT}`);
-  console.log(`✅ NEW in v2.10.0: Zeitraum-Analyse & alphabetische Sortierung`);
+  console.log(`🚀 TSV Rot Trainer API v2.10.1 running on port ${PORT}`);
+  console.log(`✅ FIX in v2.10.1: Zeitraum-Analyse verwendet jetzt week_number statt recorded_at`);
   console.log(`   - GET /api/reports/trainer-hours-range?start=YYYY-MM-DD&end=YYYY-MM-DD`);
   console.log(`   - GET /api/reports/hall-usage-range?start=YYYY-MM-DD&end=YYYY-MM-DD`);
   console.log(`   - Trainer alphabetisch sortiert`);
