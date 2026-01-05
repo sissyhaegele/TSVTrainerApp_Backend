@@ -1613,12 +1613,12 @@ app.get('/api/weekly-activities/:year/:week', async (req, res) => {
   console.log(`📅 Weekly Activities Request: KW ${week}/${year}`);
   
   try {
+    // Gruppiere Activities und fasse Trainer zusammen
     const [activities] = await pool.execute(`
       SELECT 
-        ts.id,
+        MIN(ts.id) as id,
         ts.week_number,
         ts.year,
-        ts.trainer_id,
         ts.recorded_at as date,
         ts.day_of_week,
         ts.activity_type,
@@ -1627,14 +1627,26 @@ app.get('/api/weekly-activities/:year/:week', async (req, res) => {
         ts.hours,
         ts.visibility,
         ts.status,
-        CONCAT(t.first_name, ' ', t.last_name) as trainer_names
+        GROUP_CONCAT(DISTINCT CONCAT(t.first_name, ' ', t.last_name) ORDER BY t.last_name SEPARATOR ', ') as trainer_names,
+        COUNT(DISTINCT ts.trainer_id) as trainer_count
       FROM training_sessions ts
       LEFT JOIN trainers t ON ts.trainer_id = t.id
       WHERE ts.week_number = ?
         AND ts.year = ?
         AND ts.course_id IS NULL 
         AND ts.activity_type IS NOT NULL
-      ORDER BY ts.recorded_at ASC, ts.id ASC
+      GROUP BY 
+        ts.recorded_at,
+        ts.day_of_week,
+        ts.activity_type,
+        ts.custom_type,
+        ts.notes,
+        ts.hours,
+        ts.visibility,
+        ts.status,
+        ts.week_number,
+        ts.year
+      ORDER BY ts.recorded_at ASC
     `, [parseInt(week), parseInt(year)]);
     
     console.log(`✅ Found ${activities.length} activities for KW ${week}/${year}`);
