@@ -1369,7 +1369,8 @@ app.get('/api/special-activities', async (req, res) => {
         ts.recorded_at as date,
         ts.day_of_week,
         ts.notes,
-        ts.status
+        ts.status,
+        ts.visibility
       FROM training_sessions ts
       WHERE ts.course_id IS NULL 
         AND ts.activity_type IS NOT NULL
@@ -1427,7 +1428,8 @@ app.post('/api/special-activities', async (req, res) => {
     title, 
     hours, 
     notes, 
-    trainerIds 
+    trainerIds,
+    visibility = 'internal'
   } = req.body;
   
   // Validierung
@@ -1448,8 +1450,8 @@ app.post('/api/special-activities', async (req, res) => {
     for (const trainerId of trainerIds) {
       await connection.execute(`
         INSERT INTO training_sessions 
-        (week_number, year, course_id, trainer_id, hours, status, activity_type, custom_type, notes, recorded_at, day_of_week, recorded_by)
-        VALUES (?, ?, NULL, ?, ?, 'recorded', ?, ?, ?, ?, ?, 'activity-form')
+        (week_number, year, course_id, trainer_id, hours, status, activity_type, custom_type, notes, recorded_at, day_of_week, recorded_by, visibility)
+        VALUES (?, ?, NULL, ?, ?, 'recorded', ?, ?, ?, ?, ?, 'activity-form', ?)
       `, [
         weekNumber,
         year,
@@ -1459,7 +1461,8 @@ app.post('/api/special-activities', async (req, res) => {
         activityType === 'sonstiges' ? customType : null,
         title,
         date,
-        dayOfWeek
+        dayOfWeek,
+        visibility
       ]);
     }
     
@@ -1491,7 +1494,8 @@ app.put('/api/special-activities/:activityId', async (req, res) => {
     title, 
     hours, 
     notes, 
-    trainerIds 
+    trainerIds,
+    visibility
   } = req.body;
   
   // Validierung
@@ -1535,8 +1539,8 @@ app.put('/api/special-activities/:activityId', async (req, res) => {
     for (const trainerId of trainerIds) {
       await connection.execute(`
         INSERT INTO training_sessions 
-        (week_number, year, course_id, trainer_id, hours, status, activity_type, custom_type, notes, recorded_at, day_of_week, recorded_by)
-        VALUES (?, ?, NULL, ?, ?, 'recorded', ?, ?, ?, ?, ?, 'activity-form')
+        (week_number, year, course_id, trainer_id, hours, status, activity_type, custom_type, notes, recorded_at, day_of_week, recorded_by, visibility)
+        VALUES (?, ?, NULL, ?, ?, 'recorded', ?, ?, ?, ?, ?, 'activity-form', ?)
       `, [
         weekNumber,
         year,
@@ -1546,7 +1550,8 @@ app.put('/api/special-activities/:activityId', async (req, res) => {
         activityType === 'sonstiges' ? customType : null,
         title,
         date,
-        dayOfWeek
+        dayOfWeek,
+        visibility
       ]);
     }
     
@@ -1598,6 +1603,38 @@ app.delete('/api/special-activities/:activityId', async (req, res) => {
   } catch (error) {
     console.error('Error deleting special activity:', error);
     res.status(500).json({ error: 'Fehler beim Löschen der Aktivität' });
+  }
+});
+
+// GET /api/weekly-activities/:year/:week - Aktivitäten einer Woche für WeeklyView
+app.get('/api/weekly-activities/:year/:week', async (req, res) => {
+  const { year, week } = req.params;
+  
+  try {
+    const [activities] = await pool.execute(`
+      SELECT 
+        ts.id,
+        ts.recorded_at as date,
+        ts.activity_type,
+        ts.custom_type,
+        ts.notes as title,
+        ts.hours,
+        ts.visibility,
+        GROUP_CONCAT(DISTINCT CONCAT(t.first_name, ' ', t.last_name) ORDER BY t.last_name SEPARATOR ', ') as trainer_names
+      FROM training_sessions ts
+      LEFT JOIN trainers t ON ts.trainer_id = t.id
+      WHERE ts.week_number = ?
+        AND ts.year = ?
+        AND ts.course_id IS NULL 
+        AND ts.activity_type IS NOT NULL
+      GROUP BY ts.recorded_at, ts.notes, ts.activity_type, ts.hours, ts.visibility
+      ORDER BY ts.recorded_at ASC
+    `, [parseInt(week), parseInt(year)]);
+    
+    res.json(activities);
+  } catch (error) {
+    console.error('Error loading weekly activities:', error);
+    res.status(500).json({ error: 'Failed to fetch weekly activities' });
   }
 });
 
@@ -1842,6 +1879,29 @@ app.get('/api/public/kursplan', async (req, res) => {
     // 9. Wochendaten berechnen (für Anzeige "Mo 02.12. - So 08.12.")
     const weekDates = getWeekDates(weekNumber, year);
 
+    // 10. Öffentliche Sonderaktivitäten laden (v2.12.0)
+    const [publicActivities] = await pool.execute(`
+      SELECT 
+        ts.id,
+        ts.recorded_at as date,
+        ts.activity_type,
+        ts.custom_type,
+        ts.notes as title,
+        ts.hours,
+        ts.day_of_week,
+        ts.visibility,
+        GROUP_CONCAT(DISTINCT CONCAT(t.first_name, ' ', t.last_name) ORDER BY t.last_name SEPARATOR ', ') as trainer_names
+      FROM training_sessions ts
+      LEFT JOIN trainers t ON ts.trainer_id = t.id
+      WHERE ts.week_number = ?
+        AND ts.year = ?
+        AND ts.course_id IS NULL 
+        AND ts.activity_type IS NOT NULL
+        AND ts.visibility = 'public'
+      GROUP BY ts.recorded_at, ts.notes, ts.activity_type, ts.hours, ts.day_of_week
+      ORDER BY ts.recorded_at ASC
+    `, [weekNumber, year]);
+
     res.json({
       success: true,
       weekNumber,
@@ -1850,6 +1910,7 @@ app.get('/api/public/kursplan', async (req, res) => {
       holidayName,
       weekDates,
       schedule: scheduleByDay,
+      activities: publicActivities,
       generatedAt: new Date().toISOString()
     });
 
