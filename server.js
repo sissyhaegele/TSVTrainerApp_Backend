@@ -2187,7 +2187,7 @@ app.get('/api/public/kursplan', async (req, res) => {
     const weekDates = getWeekDates(weekNumber, year);
 
     // 10. Öffentliche Sonderaktivitäten laden (v2.12.0)
-    const [publicActivities] = await pool.execute(`
+    const [publicActivitiesRaw] = await pool.execute(`
       SELECT 
         MIN(ts.id) as id,
         ts.recorded_at as date,
@@ -2208,6 +2208,12 @@ app.get('/api/public/kursplan', async (req, res) => {
       GROUP BY ts.recorded_at, ts.notes, ts.activity_type, ts.custom_type, ts.hours, ts.day_of_week, ts.visibility
       ORDER BY ts.recorded_at ASC
     `, [weekNumber, year]);
+
+    // v2.12.5: Konvertiere day_of_week zu Deutsch
+    const publicActivities = publicActivitiesRaw.map(activity => ({
+      ...activity,
+      day_of_week: dayMapToGerman[activity.day_of_week] || activity.day_of_week
+    }));
 
     res.json({
       success: true,
