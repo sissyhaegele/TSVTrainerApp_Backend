@@ -1997,7 +1997,7 @@ app.get('/api/public/kursplan', async (req, res) => {
     // 10. Öffentliche Sonderaktivitäten laden (v2.12.0)
     const [publicActivities] = await pool.execute(`
       SELECT 
-        ts.id,
+        MIN(ts.id) as id,
         ts.recorded_at as date,
         ts.activity_type,
         ts.custom_type,
@@ -2013,7 +2013,7 @@ app.get('/api/public/kursplan', async (req, res) => {
         AND ts.course_id IS NULL 
         AND ts.activity_type IS NOT NULL
         AND ts.visibility = 'public'
-      GROUP BY ts.recorded_at, ts.notes, ts.activity_type, ts.hours, ts.day_of_week
+      GROUP BY ts.recorded_at, ts.notes, ts.activity_type, ts.custom_type, ts.hours, ts.day_of_week, ts.visibility
       ORDER BY ts.recorded_at ASC
     `, [weekNumber, year]);
 
