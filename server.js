@@ -1149,6 +1149,12 @@ app.post('/api/holiday-weeks', async (req, res) => {
     
     await connection.query('INSERT IGNORE INTO holiday_weeks (week_number, year) VALUES (?, ?)', [week_number, year]);
     
+    // v2.12.4: Lösche alle Kurs-Ausnahmen für diese Woche (alle Kurse sollen ausfallen)
+    await connection.query(
+      'DELETE FROM course_exceptions WHERE week_number = ? AND year = ?',
+      [week_number, year]
+    );
+    
     // v2.5.1: Lösche training_sessions für diese Woche falls in Vergangenheit
     const [courseAssignments] = await connection.query(
       `SELECT DISTINCT wa.course_id, c.day_of_week
@@ -1752,6 +1758,191 @@ app.delete('/api/course-exceptions', async (req, res) => {
     res.status(500).json({ error: 'Fehler beim Entfernen der Ausnahme' });
   }
 });
+
+// DELETE /api/course-exceptions/clear - ALLE Kurs-Ausnahmen einer Woche entfernen
+app.delete('/api/course-exceptions/clear', async (req, res) => {
+  const { week_number, year } = req.query;
+  
+  try {
+    const [result] = await pool.execute(`
+      DELETE FROM course_exceptions
+      WHERE week_number = ? AND year = ?
+    `, [parseInt(week_number), parseInt(year)]);
+    
+    console.log(`🗑️ Alle Course Exceptions entfernt für KW ${week_number}/${year}: ${result.affectedRows} gelöscht`);
+    res.json({ success: true, deletedCount: result.affectedRows });
+  } catch (error) {
+    console.error('Error clearing course exceptions:', error);
+    res.status(500).json({ error: 'Fehler beim Entfernen der Ausnahmen' });
+  }
+});
+
+// ==================== ACTIVITY NOTES (v2.12.5) ====================
+
+// Tabelle activity_notes erstellen falls nicht vorhanden
+async function ensureActivityNotesTable() {
+  try {
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS activity_notes (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        activity_date DATE NOT NULL,
+        activity_title VARCHAR(255) NOT NULL,
+        week_number INT NOT NULL,
+        year INT NOT NULL,
+        note_type ENUM('internal', 'public') NOT NULL DEFAULT 'internal',
+        note_text TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_activity_lookup (activity_date, activity_title),
+        INDEX idx_week_year (week_number, year)
+      )
+    `);
+    console.log('✅ activity_notes Tabelle bereit');
+  } catch (error) {
+    console.error('Error creating activity_notes table:', error);
+  }
+}
+ensureActivityNotesTable();
+
+// GET /api/activity-notes - Notizen für eine Aktivität laden
+app.get('/api/activity-notes', async (req, res) => {
+  const { date, title } = req.query;
+  
+  if (!date || !title) {
+    return res.status(400).json({ error: 'date und title erforderlich' });
+  }
+  
+  try {
+    const [notes] = await pool.execute(`
+      SELECT id, activity_date, activity_title, week_number, year, note_type, note_text, created_at, updated_at
+      FROM activity_notes
+      WHERE activity_date = ? AND activity_title = ?
+      ORDER BY created_at ASC
+    `, [date, title]);
+    
+    res.json(notes);
+  } catch (error) {
+    console.error('Error fetching activity notes:', error);
+    res.status(500).json({ error: 'Fehler beim Laden der Notizen' });
+  }
+});
+
+// GET /api/activity-notes/week - Alle Notizen für Aktivitäten einer Woche
+app.get('/api/activity-notes/week', async (req, res) => {
+  const { week_number, year } = req.query;
+  
+  if (!week_number || !year) {
+    return res.status(400).json({ error: 'week_number und year erforderlich' });
+  }
+  
+  try {
+    const [notes] = await pool.execute(`
+      SELECT id, activity_date, activity_title, week_number, year, note_type, note_text, created_at, updated_at
+      FROM activity_notes
+      WHERE week_number = ? AND year = ?
+      ORDER BY activity_date, activity_title, created_at
+    `, [parseInt(week_number), parseInt(year)]);
+    
+    // Gruppiere nach activity_date + activity_title
+    const grouped = {};
+    notes.forEach(note => {
+      const key = `${note.activity_date}_${note.activity_title}`;
+      if (!grouped[key]) {
+        grouped[key] = [];
+      }
+      grouped[key].push(note);
+    });
+    
+    res.json({ notes, grouped });
+  } catch (error) {
+    console.error('Error fetching weekly activity notes:', error);
+    res.status(500).json({ error: 'Fehler beim Laden der Notizen' });
+  }
+});
+
+// POST /api/activity-notes - Neue Notiz für Aktivität erstellen
+app.post('/api/activity-notes', async (req, res) => {
+  const { activity_date, activity_title, week_number, year, note_type, note_text } = req.body;
+  
+  if (!activity_date || !activity_title || !week_number || !year || !note_type || !note_text) {
+    return res.status(400).json({ error: 'Alle Felder erforderlich' });
+  }
+  
+  try {
+    const [result] = await pool.execute(`
+      INSERT INTO activity_notes (activity_date, activity_title, week_number, year, note_type, note_text)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [activity_date, activity_title, parseInt(week_number), parseInt(year), note_type, note_text]);
+    
+    const [newNote] = await pool.execute(
+      'SELECT * FROM activity_notes WHERE id = ?',
+      [result.insertId]
+    );
+    
+    console.log(`📝 Activity-Notiz erstellt: ${activity_title} (${note_type})`);
+    res.status(201).json(newNote[0]);
+  } catch (error) {
+    console.error('Error creating activity note:', error);
+    res.status(500).json({ error: 'Fehler beim Erstellen der Notiz' });
+  }
+});
+
+// PUT /api/activity-notes/:id - Notiz bearbeiten
+app.put('/api/activity-notes/:id', async (req, res) => {
+  const { id } = req.params;
+  const { note_type, note_text } = req.body;
+  
+  if (!note_type || !note_text) {
+    return res.status(400).json({ error: 'note_type und note_text erforderlich' });
+  }
+  
+  try {
+    await pool.execute(`
+      UPDATE activity_notes 
+      SET note_type = ?, note_text = ?
+      WHERE id = ?
+    `, [note_type, note_text, parseInt(id)]);
+    
+    const [updated] = await pool.execute(
+      'SELECT * FROM activity_notes WHERE id = ?',
+      [parseInt(id)]
+    );
+    
+    if (updated.length === 0) {
+      return res.status(404).json({ error: 'Notiz nicht gefunden' });
+    }
+    
+    console.log(`📝 Activity-Notiz aktualisiert: ID ${id}`);
+    res.json(updated[0]);
+  } catch (error) {
+    console.error('Error updating activity note:', error);
+    res.status(500).json({ error: 'Fehler beim Aktualisieren der Notiz' });
+  }
+});
+
+// DELETE /api/activity-notes/:id - Notiz löschen
+app.delete('/api/activity-notes/:id', async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    const [result] = await pool.execute(
+      'DELETE FROM activity_notes WHERE id = ?',
+      [parseInt(id)]
+    );
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Notiz nicht gefunden' });
+    }
+    
+    console.log(`🗑️ Activity-Notiz gelöscht: ID ${id}`);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting activity note:', error);
+    res.status(500).json({ error: 'Fehler beim Löschen der Notiz' });
+  }
+});
+
+// ==================== ENDE ACTIVITY NOTES ====================
 
 // ==================== ENDE SPECIAL ACTIVITIES ====================
 
