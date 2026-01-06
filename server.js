@@ -1856,6 +1856,13 @@ app.get('/api/public/kursplan', async (req, res) => {
     );
     const cancelledMap = new Map(cancelledCourses.map(c => [c.course_id, c.reason]));
 
+    // 3b. Kurs-Ausnahmen laden (Kurse die TROTZ Ferien stattfinden)
+    const [courseExceptions] = await pool.query(
+      'SELECT course_id FROM course_exceptions WHERE week_number = ? AND year = ?',
+      [weekNumber, year]
+    );
+    const exceptionSet = new Set(courseExceptions.map(e => e.course_id));
+
     // v2.8.0: Öffentliche Notizen laden
     const [publicNotes] = await pool.query(`
       SELECT course_id, note_text
@@ -1939,20 +1946,15 @@ app.get('/api/public/kursplan', async (req, res) => {
     // 7. Response zusammenbauen
     const schedule = courses.map(course => {
       const isCancelled = cancelledMap.has(course.id);
-      const cancelReason = cancelledMap.get(course.id) || null;
+      const hasException = exceptionSet.has(course.id);
       
-      // Kurs fällt aus wenn: explizit gecancelled ODER Ferienwoche
-      const isOff = isCancelled || isHolidayWeek;
+      // Kurs fällt aus wenn: explizit gecancelled ODER (Ferienwoche UND keine Ausnahme)
+      const isOff = isCancelled || (isHolidayWeek && !hasException);
       
       let status = 'findet statt';
-      let statusReason = null;
       
-      if (isCancelled) {
+      if (isOff) {
         status = 'fällt aus';
-        statusReason = cancelReason || 'Ausfall';
-      } else if (isHolidayWeek) {
-        status = 'fällt aus';
-        statusReason = holidayName;
       }
 
       const trainers = assignmentMap.get(course.id) || [];
@@ -1968,7 +1970,6 @@ app.get('/api/public/kursplan', async (req, res) => {
         category: course.category || '',
         trainers: trainers.map(t => `${t.firstName} ${t.lastName}`),
         status: status,
-        statusReason: statusReason,
         isOff: isOff,
         public_notes: publicNotesMap[course.id] || []
       };
