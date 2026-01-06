@@ -2024,6 +2024,8 @@ app.get('/api/public/kursplan', async (req, res) => {
       year,
       isHolidayWeek,
       holidayName,
+      hasExceptions: exceptionSet.size > 0,
+      exceptionsCount: exceptionSet.size,
       weekDates,
       schedule: scheduleByDay,
       activities: publicActivities,
