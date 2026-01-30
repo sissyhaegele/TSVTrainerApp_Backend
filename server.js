@@ -2383,7 +2383,7 @@ app.get('/api/reports/trainer-hours', async (req, res) => {
   }
 });
 
-// Hallen-Auslastung für ein Jahr
+// Hallen-Auslastung für ein Jahr (v2.10.2: Fix - zählt Kurse, nicht Trainer)
 app.get('/api/reports/hall-usage', async (req, res) => {
   const { year } = req.query;
   
@@ -2392,19 +2392,24 @@ app.get('/api/reports/hall-usage', async (req, res) => {
   }
   
   try {
+    // Fix: Pro Kurs/Woche nur 1x zählen (nicht pro Trainer)
+    // Stunden aus Kursdauer berechnen, nicht aus training_sessions
     const [results] = await pool.query(
       `SELECT 
          c.location,
-         ROUND(SUM(ts.hours), 1) as total_hours,
+         ROUND(SUM(
+           TIMESTAMPDIFF(MINUTE, c.start_time, c.end_time) / 60.0
+         ), 1) as total_hours,
          COUNT(DISTINCT c.id) as course_count,
-         COUNT(DISTINCT CONCAT(ts.week_number, '-', ts.year)) as training_weeks,
-         COUNT(ts.id) as session_count
-       FROM training_sessions ts
-       JOIN courses c ON ts.course_id = c.id
-       WHERE ts.year = ? 
-         AND ts.status = 'recorded'
-         AND c.location IS NOT NULL
-         AND c.location != ''
+         COUNT(DISTINCT CONCAT(unique_sessions.week_number, '-', unique_sessions.year)) as training_weeks,
+         COUNT(*) as session_count
+       FROM (
+         SELECT DISTINCT course_id, week_number, year
+         FROM training_sessions
+         WHERE year = ? AND status = 'recorded'
+       ) unique_sessions
+       JOIN courses c ON unique_sessions.course_id = c.id
+       WHERE c.location IS NOT NULL AND c.location != ''
        GROUP BY c.location
        ORDER BY total_hours DESC`,
       [parseInt(year)]
@@ -2509,7 +2514,7 @@ app.get('/api/reports/trainer-hours-range', async (req, res) => {
   }
 });
 
-// Hallen-Auslastung für einen Zeitraum (von-bis)
+// Hallen-Auslastung für einen Zeitraum (v2.10.2: Fix - zählt Kurse, nicht Trainer)
 app.get('/api/reports/hall-usage-range', async (req, res) => {
   const { start, end } = req.query;
   
@@ -2534,21 +2539,25 @@ app.get('/api/reports/hall-usage-range', async (req, res) => {
     const startWeek = getISOWeek(startDate);
     const endWeek = getISOWeek(endDate);
     
-    // Query mit Wochen-Filter
+    // Fix: Pro Kurs/Woche nur 1x zählen (nicht pro Trainer)
     const [results] = await pool.query(
       `SELECT 
          c.location,
-         ROUND(SUM(ts.hours), 1) as total_hours,
+         ROUND(SUM(
+           TIMESTAMPDIFF(MINUTE, c.start_time, c.end_time) / 60.0
+         ), 1) as total_hours,
          COUNT(DISTINCT c.id) as course_count,
-         COUNT(DISTINCT CONCAT(ts.week_number, '-', ts.year)) as training_weeks,
-         COUNT(ts.id) as session_count
-       FROM training_sessions ts
-       JOIN courses c ON ts.course_id = c.id
-       WHERE ((ts.year = ? AND ts.week_number >= ?) OR ts.year > ?)
-         AND ((ts.year = ? AND ts.week_number <= ?) OR ts.year < ?)
-         AND ts.status = 'recorded'
-         AND c.location IS NOT NULL
-         AND c.location != ''
+         COUNT(DISTINCT CONCAT(unique_sessions.week_number, '-', unique_sessions.year)) as training_weeks,
+         COUNT(*) as session_count
+       FROM (
+         SELECT DISTINCT course_id, week_number, year
+         FROM training_sessions
+         WHERE ((year = ? AND week_number >= ?) OR year > ?)
+           AND ((year = ? AND week_number <= ?) OR year < ?)
+           AND status = 'recorded'
+       ) unique_sessions
+       JOIN courses c ON unique_sessions.course_id = c.id
+       WHERE c.location IS NOT NULL AND c.location != ''
        GROUP BY c.location
        ORDER BY total_hours DESC`,
       [startWeek.year, startWeek.week, startWeek.year, 
@@ -2594,11 +2603,11 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 TSV Rot Trainer API v2.10.1 running on port ${PORT}`);
-  console.log(`✅ FIX in v2.10.1: Zeitraum-Analyse verwendet jetzt week_number statt recorded_at`);
-  console.log(`   - GET /api/reports/trainer-hours-range?start=YYYY-MM-DD&end=YYYY-MM-DD`);
+  console.log(`🚀 TSV Rot Trainer API v2.10.2 running on port ${PORT}`);
+  console.log(`✅ FIX in v2.10.2: Hallen-Auslastung zählt jetzt Kurse, nicht Trainer`);
+  console.log(`   - Jahres-Zählung: 01.01. - 31.12. des jeweiligen Jahres`);
+  console.log(`   - GET /api/reports/hall-usage?year=YYYY`);
   console.log(`   - GET /api/reports/hall-usage-range?start=YYYY-MM-DD&end=YYYY-MM-DD`);
-  console.log(`   - Trainer alphabetisch sortiert`);
 });
 app.get('/api/trainer-hours/:trainerId/:year', async (req, res) => {
   const { trainerId, year } = req.params;
